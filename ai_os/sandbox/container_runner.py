@@ -65,9 +65,21 @@ class SandboxProfile:
 # typescript — Phase 1's analyzer (`ai_os/analyzer/languages.py`) already
 # treats JS/TS as siblings (same query family, same import-resolution
 # logic), so the sandbox profile matrix mirrors that.
+#
+# Python note: since every validation run is --network none (doc 10's own
+# hardening requirement), a `pip install` *inside* the container can never
+# reach PyPI — vanilla python:3.12-slim has no pytest, so this profile would
+# always fail with "pytest: command not found" regardless of the project
+# being validated. "ai-os-sandbox-python:3.12" (docker/python-sandbox.Dockerfile,
+# build once: `docker build -t ai-os-sandbox-python:3.12 -f
+# docker/python-sandbox.Dockerfile .`) bakes pytest in ahead of time, WITH
+# network access, so the actual validation run stays fully network-isolated.
+# A project's own third-party deps beyond pytest still can't install inside
+# the sandbox for the same reason — a known, flagged gap (see the
+# Dockerfile's own comment and CLAUDE.md), not silently fixed here.
 SANDBOX_PROFILES: dict[str, SandboxProfile] = {
     "python": SandboxProfile(
-        "python:3.12-slim",
+        "ai-os-sandbox-python:3.12",
         "pip install -q -r requirements.txt 2>/dev/null; pytest",
     ),
     "javascript": SandboxProfile("node:20-alpine", "npm test"),
