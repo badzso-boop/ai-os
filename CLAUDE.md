@@ -6,13 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Phase 1 — Polyglot Analyzer & Knowledge Graph — is implemented and stable.** Everything under `ai_os/analyzer/`, `ai_os/knowledge/`, `ai_os/registry.py`, `ai_os/cli.py` is real, working code.
 
-**Phase 2 — Orchestrator Core & Git Engine — is also implemented and stable.** Everything under `ai_os/core/` (`models.py`, `db/`, `lock_manager.py`, `staging.py`, `planner.py`) is real, working code. Phase 3–4 (`mcp/`, `sandbox/`, `ui/`) are **not built yet** — they remain the *planned* architecture described in `docs/`, which stays the single source of truth for anything not covered below. Check the filesystem before assuming a module/command exists.
+**Phase 2 — Orchestrator Core & Git Engine — is also implemented and stable.** Everything under `ai_os/core/` (`models.py`, `db/`, `lock_manager.py`, `staging.py`, `planner.py`) is real, working code.
+
+**Phase 3a — MCP Provider Adapters & Router — is implemented and stable.** Everything under `ai_os/mcp/` (`adapters/`, `protocol_router.py`, `config.py`) is real, working code, verified against real providers. **This is explicitly a slice of doc 16's full Phase 3, not all of it** — `ai_os/mcp/mcp_server.py` (the JSON-RPC tool server exposing `propose_file_patch`/`fetch_symbol_definition`/`trigger_sandbox_validation` to a connected LLM client, doc 07 §3/§4) and `ai_os/sandbox/` (the Docker ephemeral runner, doc 10) are **not built yet**, along with `ui/` (Phase 4). They remain the *planned* architecture described in `docs/`, which stays the single source of truth for anything not covered below. Check the filesystem before assuming a module/command exists.
 
 ### Build / test
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q          # 79 tests (78 passed + 1 documented xfail), ~4s
+.venv/bin/pytest -q          # 130 tests (129 passed + 1 documented xfail), ~4s — never makes a real network/provider call
+cp .env.example .env         # fill in whichever provider credentials you have
+.venv/bin/ai-os llm list     # shows which providers are actually configured
+.venv/bin/ai-os llm test anthropic --prompt "say hi"   # REAL call, consumes real usage/quota
 ```
 No `mypy`/`flake8`/`npm test`/`tsc` configured yet.
 
@@ -106,12 +111,46 @@ Ties `LockManager` + `GitStagingEngine` together against a real disposable git r
 
 ---
 
+## Phase 3a — how it actually works
+
+**Deliberate, discussed-with-the-user deviation from `docs/15_PROVIDER_AUTHENTICATION_AND_ROUTING.md`**: that doc's "Native Web Session" auth mode means scraping `claude.ai`/`chatgpt.com`/`gemini.google.com` browser session cookies/tokens to call their private, undocumented internal APIs, bypassing the paid developer API — a ToS-risk, fragile, reverse-engineering approach. **Not built, on purpose.** For Anthropic specifically there's a legitimate official alternative instead: the `claude` CLI, already installed and OAuth-logged-in on this machine, supports non-interactive scripting (`-p`/`--print`, `--output-format json`) that consumes the user's Claude subscription's included usage through Anthropic's own sanctioned interface — see `anthropic_adapter.py` below. The OpenAI/ChatGPT adapter was skipped entirely (not requested, and its only doc-specified auth mode is the same risky scraping approach). Gemini's web-session-cookie mode was also skipped (not requested, same concern) — only its API-key mode is built.
+
+### Module map (`ai_os/mcp/`)
+
+- **`adapters/base_adapter.py`** — shared pydantic contract (mirrors `ai_os/core/models.py`'s role in Phase 2): `TokenUsage`, `LLMTaskRequest` (task_id, system_prompt, context_payload, optional `model` override), `LLMTaskResponse` (task_id, provider, model_name, generated_text, usage), and the `BaseMCPAdapter` ABC (`async execute_task(request) -> LLMTaskResponse`).
+- **`adapters/anthropic_adapter.py`** — `AnthropicAdapter`, two modes. **CLI session mode** (`use_cli_session=True`): shells out to `claude -p <prompt> --output-format json --model <model> --permission-mode plan --disallowedTools "Bash Edit Write NotebookEdit Read Glob Grep WebFetch WebSearch"` via `asyncio.create_subprocess_exec` (matching `staging.py`'s subprocess pattern) — the permission lockdown matters: this adapter is a pure "prompt in, text out" call, AI-OS's own Git worktree/patch layer is what should mediate real file changes, not a raw spawned Claude Code session. Runs with `cwd` pinned to a lazily-created, per-instance scratch directory (not the repo) so the CLI doesn't auto-load CLAUDE.md/project context (confirmed empirically: ~15K wasted cache-creation tokens on a trivial prompt otherwise) — the `--bare` flag would also suppress this but forces API-key-only auth, defeating the point of session mode, so it's deliberately not used. Parses the verified real JSON shape: `result`→`generated_text`, `usage.input_tokens`/`usage.output_tokens`, `total_cost_usd`→`estimated_usd_cost`. **API-key mode** (`api_key=...`): standard `httpx` POST to `api.anthropic.com/v1/messages`.
+- **`adapters/gemini_adapter.py`** — `GeminiAdapter`, Google AI Studio API-key mode only, via `httpx` against `generativelanguage.googleapis.com`. System prompt goes in a separate top-level `systemInstruction` field (camelCase), not prepended into user text. Default model verified against Google's current docs at implementation time (not doc 15's stale `gemini-1.5-flash`) — fully overridable via constructor/`request.model` either way, so a future rename is a one-line config fix, not a redesign. Handles Gemini's empty-`candidates` safety-filter-block failure mode explicitly (surfaces `promptFeedback.blockReason`) rather than a raw `KeyError`.
+- **`adapters/openrouter_adapter.py`** — `OpenRouterAdapter`, new (not in any doc). OpenAI-compatible chat-completions schema via `httpx` against `openrouter.ai/api/v1/chat/completions`. **Deliberately has no hardcoded default model** — unlike the other two adapters, `execute_task` raises `ValueError` if neither `request.model` nor a constructor default is set, since OpenRouter's whole value is caller-driven model choice across many providers. Optional `HTTP-Referer`/`X-Title` attribution headers, sent only when configured.
+- **`protocol_router.py`** — `ProtocolRouter`: a thin registry of configured adapters + a static, overridable risk-level→provider preference order (`DEFAULT_RISK_PROVIDER_ORDER`). **Deliberately NOT** doc 02 §2.2's full Dynamic Scheduler (no TPM/RPM tracking, no cost-based backoff) — building real rate-limit-aware scheduling without real usage data to tune it against would be premature. `execute(provider, request)` for explicit choice, `execute_for_risk(risk_level, request)` picks the first configured provider in that risk level's preference list.
+- **`config.py`** — `load_configured_adapters()`: reads `.env` (via `python-dotenv`, real env vars always win) + the environment, builds only the adapters with actual evidence of credentials — Anthropic session mode requires the `claude` binary to actually resolve via `shutil.which` (not just an env flag), Gemini/OpenRouter require their API key env var to be non-empty. Silently omits unconfigured providers rather than raising; callers decide what to do about a missing provider.
+
+### CLI surface (`ai-os llm ...`)
+
+```
+ai-os llm list                                            # which providers are configured
+ai-os llm test <provider> --prompt "..." [--system ...] [--model ...]   # REAL call, real usage/quota
+```
+`ai-os llm test` is the manual, human-run verification tool (mirrors Phase 2's demo-script precedent) — the automated pytest suite never calls a real provider; adapter tests use `httpx.MockTransport` (HTTP adapters) or a fake stub executable (Anthropic CLI mode) instead.
+
+### Configuration
+
+Copy `.env.example` to `.env` (gitignored) and fill in whichever providers are actually available — see that file for the exact variable names (`ANTHROPIC_MODE`/`ANTHROPIC_API_KEY`/`ANTHROPIC_CLI`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`/`OPENROUTER_DEFAULT_MODEL`/`OPENROUTER_SITE_URL`/`OPENROUTER_APP_TITLE`).
+
+### Explicitly out of scope for Phase 3a (not silently dropped — see doc 16 §3 for what's still needed)
+
+- `ai_os/mcp/mcp_server.py` — the JSON-RPC tool server (`propose_file_patch`/`fetch_symbol_definition`/`trigger_sandbox_validation`, doc 07 §3/§4) that would let a connected LLM call back into AI-OS's own systems. This is a separate, larger task requiring an actual task-execution loop wired through `ai_os.core.staging`/`ai_os.core.lock_manager`.
+- `ai_os/sandbox/` — the Docker ephemeral validation runner (doc 10).
+- The OpenAI/ChatGPT adapter and any local/Ollama adapter — not requested.
+- Real TPM/RPM rate-limit tracking / cost-based backoff in `protocol_router.py` (doc 02 §2.2).
+
+---
+
 ## Intended directory layout
 
 Per `docs/14_PROJECT_DIRECTORY_STRUCTURE.md`:
 - `ai_os/analyzer/`, `ai_os/knowledge/`, `ai_os/registry.py`, `ai_os/cli.py` — **implemented (Phase 1)**, described above.
 - `ai_os/core/` — `models.py`, `db/` (`database.py`, `models.py`), `lock_manager.py`, `staging.py`, `planner.py` — **implemented (Phase 2)**, described above. `scheduler.py` (Dynamic Scheduler / LLM risk→model routing) — **not yet created** (needs Phase 3's MCP adapters).
-- `ai_os/mcp/` — `mcp_server.py`, `protocol_router.py`, `adapters/` (per-provider: anthropic, openai, gemini, local) — **not yet created**.
+- `ai_os/mcp/` — `protocol_router.py`, `config.py`, `adapters/base_adapter.py`/`anthropic_adapter.py`/`gemini_adapter.py`/`openrouter_adapter.py` — **implemented (Phase 3a)**, described above. `mcp_server.py` and an OpenAI/local adapter — **not yet created**.
 - `ai_os/sandbox/` — `container_runner.py`, `log_parser.py` — **not yet created**.
 - `ui/` — React + Vite + Tailwind + React Flow + Monaco frontend — **not yet created**.
 
@@ -127,7 +166,7 @@ When starting Phase 3+ implementation, follow this structure unless there's a co
 | `04_KNOWLEDGE_CONTEXT_ENGINE.md` | Knowledge Graph node/edge types, skeleton/stub context compression, event-driven cache invalidation (Phase 1 implements the graph + stubs; event-driven invalidation is not built) |
 | `05_EXECUTION_VALIDATION_SANDBOX.md` | Git worktree isolation + ephemeral Docker validation + feedback/HITL state machine — worktree isolation implemented in Phase 2 (`staging.py`); Docker sandbox/HITL not built |
 | `06_GLASS_BOX_UI.md` | Observability dashboard concept, WebSocket event shape, HITL control panel options — not built |
-| `07_MCP_ADAPTER_ROUTER.md` | Kernel-vs-cores framing, exact MCP JSON-RPC tool schemas, Python blueprint — not built |
+| `07_MCP_ADAPTER_ROUTER.md` | Kernel-vs-cores framing, exact MCP JSON-RPC tool schemas, Python blueprint — the JSON-RPC tool-server half (`mcp_server.py`) not built; the adapter/routing half **implemented in Phase 3a**, see `protocol_router.py`/`adapters/` above |
 | `08_KNOWLEDGE_GRAPH_AND_SUBGRAPH_EXTRACTION.md` | Full graph schema, k-hop subgraph algorithm, skeleton extractor — **implemented in Phase 1**, see `graph_engine.py`/`skeleton_extractor.py` above |
 | `09_GIT_WORKTREE_STAGING_ENGINE.md` | Worktree lifecycle, async merge queue, rebase/re-validate rule — **implemented in Phase 2**, see `staging.py` above |
 | `10_EPHEMERAL_CONTAINER_SANDBOX_SPEC.md` | Container hardening flags, per-language sandbox profile matrix — not built |
@@ -135,8 +174,8 @@ When starting Phase 3+ implementation, follow this structure unless there's a co
 | `12_GLASS_BOX_UI_AND_HITL_SPEC.md` | Full 3-stage HITL workflow, UI component blueprint — not built |
 | `13_DB_SCHEMA_AND_MODELS.md` | ER diagram and SQLAlchemy 2.0 async models — **implemented in Phase 2**, see `db/models.py` above (Alembic migrations deliberately skipped) |
 | `14_PROJECT_DIRECTORY_STRUCTURE.md` | Intended repo layout — see "Intended directory layout" above for current-vs-planned |
-| `15_PROVIDER_AUTHENTICATION_AND_ROUTING.md` | Dual auth model per provider, `.env` shape, adapter blueprints — not built |
-| `16_MVP_DEVELOPMENT_ROADMAP.md` | 4-phase build order: (1) Analyzer & Knowledge Graph **[done]**, (2) Core/Locking/Git **[done]**, (3) MCP Router & Sandbox, (4) Glass Box UI & HITL |
+| `15_PROVIDER_AUTHENTICATION_AND_ROUTING.md` | Dual auth model per provider, `.env` shape, adapter blueprints — **implemented in Phase 3a with a deliberate deviation**: the "Native Web Session" cookie-scraping mode was rejected as ToS-risky and replaced with the official `claude` CLI scripting interface for Anthropic; see "Phase 3a" above |
+| `16_MVP_DEVELOPMENT_ROADMAP.md` | 4-phase build order: (1) Analyzer & Knowledge Graph **[done]**, (2) Core/Locking/Git **[done]**, (3) MCP Router & Sandbox **[partial — adapters/router done, sandbox/mcp_server not built]**, (4) Glass Box UI & HITL |
 | `17_YOUTUBE_SERIES_AND_OPENSOURCE_PLAN.md` | Content/marketing plan for a companion YouTube devlog series (not architecture) |
 | `18_YOUTUBE_PRODUCTION_AND_EDITING_GUIDE.md` | Video production/editing playbook for the same series (not architecture) |
 

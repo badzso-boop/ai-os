@@ -1,6 +1,8 @@
-"""AI-OS Phase 1 CLI: project registry + one-shot Polyglot Analyzer scans."""
+"""AI-OS CLI: project registry, one-shot Polyglot Analyzer scans (Phase 1),
+and manual MCP provider adapter testing (Phase 3a)."""
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 
@@ -12,6 +14,8 @@ from ai_os import registry
 from ai_os.analyzer.call_graph_builder import CallGraphBuilder
 from ai_os.analyzer.languages import LANGUAGES
 from ai_os.knowledge.graph_engine import KnowledgeEngine
+from ai_os.mcp.adapters.base_adapter import LLMTaskRequest
+from ai_os.mcp.config import load_configured_adapters
 
 console = Console()
 
@@ -188,6 +192,58 @@ def _print_summary_table(summary: dict) -> None:
     )
     if summary["graph_written_to"]:
         console.print(f"Written to {summary['graph_written_to']}")
+
+
+@main.group()
+def llm() -> None:
+    """Manually exercise a configured MCP provider adapter (Phase 3a).
+
+    This makes REAL calls using whatever credentials are configured via
+    `.env`/the environment (see `.env.example`) — it consumes real usage or
+    quota. It is a hands-on verification tool, deliberately not part of the
+    automated pytest suite (which never makes real network/subprocess calls
+    to a provider).
+    """
+
+
+@llm.command("test")
+@click.argument("provider")
+@click.option("--prompt", required=True, help="User prompt / context payload to send.")
+@click.option("--system", default="", help="Optional system prompt.")
+@click.option("--model", default=None, help="Override the provider's default model.")
+def llm_test(provider: str, prompt: str, system: str, model: str | None) -> None:
+    """Send a real request to PROVIDER (anthropic|gemini|openrouter) and print the response."""
+    adapters = load_configured_adapters()
+    if provider not in adapters:
+        raise click.ClickException(
+            f"Provider {provider!r} is not configured. Configured: {sorted(adapters) or 'none'}. "
+            "Copy .env.example to .env and fill in credentials for this provider."
+        )
+    request = LLMTaskRequest(
+        task_id="cli-llm-test", system_prompt=system, context_payload=prompt, model=model
+    )
+    response = asyncio.run(adapters[provider].execute_task(request))
+
+    console.print(f"[bold]Provider:[/bold] {response.provider}  [bold]Model:[/bold] {response.model_name}")
+    console.print(response.generated_text)
+    console.print(
+        f"\n[dim]tokens in={response.usage.input_tokens} out={response.usage.output_tokens} "
+        f"est. cost=${response.usage.estimated_usd_cost:.4f}[/dim]"
+    )
+
+
+@llm.command("list")
+def llm_list() -> None:
+    """List which providers are currently configured (credentials present)."""
+    adapters = load_configured_adapters()
+    if not adapters:
+        console.print("No providers configured. Copy .env.example to .env and fill in credentials.")
+        return
+    table = Table(title="Configured LLM providers")
+    table.add_column("Provider")
+    for name in sorted(adapters):
+        table.add_row(name)
+    console.print(table)
 
 
 if __name__ == "__main__":
