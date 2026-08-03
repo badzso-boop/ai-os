@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,7 @@ from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
 from ai_os.core.staging import GitStagingEngine
 from ai_os.knowledge.graph_engine import KnowledgeEngine
+from ai_os.mcp.adapters.base_adapter import BaseMCPAdapter, LLMTaskRequest
 from ai_os.sandbox.container_runner import EphemeralSandboxRunner
 
 
@@ -251,5 +253,116 @@ def build_claude_cli_agent_turn_executor(
                 )
         finally:
             Path(mcp_config_path).unlink(missing_ok=True)
+
+    return execute
+
+
+# -- completion-based agent turn (for providers WITHOUT autonomous tool use) -------
+
+# Sentinel-delimited file format the model is asked to emit. Deliberately NOT
+# markdown code fences: fenced blocks collide with any code the model writes
+# that itself contains ``` (very common), which makes robust parsing
+# impossible. These sentinels are vanishingly unlikely to appear in real source.
+_FILE_PATCH_RE = re.compile(
+    r"<<<AI_OS_FILE:\s*(?P<path>.+?)\s*>>>\n(?P<content>.*?)\n?<<<AI_OS_END>>>",
+    re.DOTALL,
+)
+
+COMPLETION_SYSTEM_PROMPT = (
+    "You are a software engineering agent. You are given a task and compressed "
+    "context. Produce the COMPLETE new contents of every file you need to create "
+    "or modify. For each such file, output EXACTLY this block and nothing else "
+    "around it:\n"
+    "<<<AI_OS_FILE: relative/path/from/repo/root.py>>>\n"
+    "<the full file content>\n"
+    "<<<AI_OS_END>>>\n"
+    "Rules: emit one block per file; paths are POSIX, relative to the repo root, "
+    "no leading './'; output the ENTIRE file content, not a diff or a snippet; do "
+    "not wrap blocks in markdown code fences; write no prose outside the blocks."
+)
+
+
+class AgentTurnError(RuntimeError):
+    """An agent turn produced no usable result (e.g. the model returned no
+    parseable file blocks, or tried to write outside the worktree)."""
+
+
+def parse_file_patches(text: str) -> dict[str, str]:
+    """Parses the sentinel-delimited file blocks a completion agent emits into
+    `{relative_path: content}`. Returns an empty dict if none are present (the
+    caller decides whether that's an error)."""
+    patches: dict[str, str] = {}
+    for match in _FILE_PATCH_RE.finditer(text):
+        patches[match.group("path").strip()] = match.group("content")
+    return patches
+
+
+def _write_patch_within_worktree(worktree_path: Path, relpath: str, content: str) -> None:
+    """Writes `content` to `<worktree_path>/<relpath>`, rejecting any path that
+    escapes the worktree (same defense as the MCP server's `propose_file_patch`:
+    an absolute `relpath` makes `worktree / relpath` discard the root, which the
+    `is_relative_to` check then catches, as does a `..` traversal)."""
+    root = worktree_path.resolve()
+    target = (worktree_path / relpath).resolve()
+    if not target.is_relative_to(root):
+        raise AgentTurnError(f"patch path {relpath!r} escapes the worktree root")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+
+
+def build_completion_agent_turn_executor(
+    adapter: BaseMCPAdapter, model: str | None = None
+) -> AgentTurnExecutor:
+    """Builds an `AgentTurnExecutor` for providers that DON'T support
+    autonomous MCP tool-calling (Gemini, OpenRouter, Anthropic API-key mode).
+
+    Instead of letting the model call `propose_file_patch` itself, this sends
+    the task + context + (on retries) the previous validation output as a plain
+    completion, asks for the full new content of each file to change in a
+    sentinel-delimited format, and AI-OS itself writes those files into the
+    worktree. The existing `TaskRunner` sandbox-validation + retry-with-feedback
+    loop then works identically — the only difference from the Anthropic-CLI
+    executor is *who* writes the files (AI-OS here, the model-driven tool call
+    there).
+
+    Known limitation (flagged, doc'd in CLAUDE.md): asking for full file
+    contents means very large files can hit the model's output limit / get
+    truncated mid-file. Fine for the task sizes AI-OS targets (focused,
+    single-responsibility tasks per the DAG decomposition); a future diff-based
+    protocol would lift this, not built yet.
+    """
+
+    async def execute(ctx: AgentTurnContext) -> None:
+        prompt_parts = [
+            f"# Task: {ctx.task.title}",
+            ctx.task.description,
+            "",
+            f"## Files you are expected to write: {', '.join(ctx.task.target_files) or '(infer from the task)'}",
+            "",
+            "## Compressed context (relevant symbols from the Knowledge Graph)",
+            ctx.context_cache,
+        ]
+        if ctx.previous_validation_output:
+            prompt_parts += [
+                "",
+                f"## Attempt {ctx.attempt}: previous attempt's validation output (it FAILED)",
+                "Fix the code based on this output and re-emit the full corrected file(s).",
+                ctx.previous_validation_output,
+            ]
+        request = LLMTaskRequest(
+            task_id=ctx.task.id,
+            system_prompt=COMPLETION_SYSTEM_PROMPT,
+            context_payload="\n".join(prompt_parts),
+            model=model,
+        )
+        response = await adapter.execute_task(request)
+        patches = parse_file_patches(response.generated_text)
+        if not patches:
+            raise AgentTurnError(
+                f"agent turn for task {ctx.task.id!r} produced no parseable file blocks "
+                f"(model={response.model_name})"
+            )
+        for relpath, content in patches.items():
+            _write_patch_within_worktree(ctx.worktree_path, relpath, content)
 
     return execute
