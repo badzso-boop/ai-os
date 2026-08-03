@@ -126,6 +126,8 @@ def _build_summary(name_or_path, root, result, engine, elapsed, out_path) -> dic
             symbol_kinds[symbol.kind] = symbol_kinds.get(symbol.kind, 0) + 1
 
     unresolved_imports = sum(1 for e in result.import_edges if not e.resolved)
+    external_imports = sum(1 for e in result.import_edges if not e.resolved and e.external)
+    genuinely_unresolved_imports = unresolved_imports - external_imports
     ambiguous_calls = sum(1 for e in result.call_edges if e.ambiguous)
 
     return {
@@ -138,6 +140,8 @@ def _build_summary(name_or_path, root, result, engine, elapsed, out_path) -> dic
         "symbols": symbol_kinds,
         "import_edges_total": len(result.import_edges),
         "import_edges_unresolved": unresolved_imports,
+        "import_edges_external": external_imports,
+        "import_edges_genuinely_unresolved": genuinely_unresolved_imports,
         "call_edges_total": len(result.call_edges),
         "call_edges_ambiguous": ambiguous_calls,
         "extends_edges_total": len(result.extends_edges),
@@ -174,7 +178,9 @@ def _print_summary_table(summary: dict) -> None:
         edges_table.add_row(kind, str(count))
     console.print(edges_table)
     console.print(
-        f"IMPORTS unresolved: {summary['import_edges_unresolved']}/{summary['import_edges_total']}   "
+        f"IMPORTS unresolved: {summary['import_edges_unresolved']}/{summary['import_edges_total']}"
+        f" (external deps: {summary['import_edges_external']},"
+        f" genuinely unresolved: {summary['import_edges_genuinely_unresolved']})   "
         f"CALLS ambiguous: {summary['call_edges_ambiguous']}/{summary['call_edges_total']}"
     )
     console.print(

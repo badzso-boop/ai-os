@@ -4,7 +4,11 @@ name/path-based heuristics — no AI involved, per the project's "Compiler First
 """
 from __future__ import annotations
 
+import json
 import os
+import re
+import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -13,6 +17,19 @@ from tree_sitter import Node
 
 from ai_os.analyzer.languages import detect_language
 from ai_os.analyzer.tree_sitter_engine import ParsedFile, Symbol, TreeSitterEngine, node_text
+
+# Node.js builtin modules: bare specifiers that will never appear in package.json but
+# are always legitimately external, not a resolution gap.
+_NODE_BUILTINS = frozenset(
+    {
+        "assert", "buffer", "child_process", "cluster", "crypto", "dns", "events",
+        "fs", "http", "https", "net", "os", "path", "querystring", "readline",
+        "stream", "string_decoder", "timers", "tls", "tty", "url", "util", "vm",
+        "zlib", "process", "punycode",
+    }
+)
+_JAVA_STDLIB_PREFIXES = ("java.", "javax.", "jakarta.")
+_PY_STDLIB = frozenset(getattr(sys, "stdlib_module_names", ()))
 
 DEFAULT_EXCLUDED_DIRS = frozenset(
     {
@@ -43,6 +60,10 @@ class ImportEdge:
     raw_specifier: str
     target_relpath: str | None
     resolved: bool
+    # Only meaningful when resolved=False: True means the specifier was matched against a
+    # declared dependency manifest (package.json) or a known stdlib module/prefix, i.e. it's
+    # an expected external dependency, not a genuine resolution gap worth investigating.
+    external: bool = False
 
 
 @dataclass
@@ -94,6 +115,69 @@ def _find_all(node: Node, types: set[str]) -> list[Node]:
             out.append(current)
         stack.extend(current.children)
     return out
+
+
+def _load_js_dependencies(root: Path) -> set[str]:
+    """Union of dependency names declared in every package.json under root (excluding
+    node_modules), so bare imports can be told apart from genuine resolution gaps."""
+    deps: set[str] = set()
+    for pkg_json in root.rglob("package.json"):
+        if "node_modules" in pkg_json.parts:
+            continue
+        try:
+            data = json.loads(pkg_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+            deps.update(data.get(key, {}) or {})
+    return deps
+
+
+def _js_package_name(spec: str) -> str:
+    parts = spec.split("/")
+    if spec.startswith("@") and len(parts) >= 2:
+        return "/".join(parts[:2])
+    return parts[0]
+
+
+_PY_DEP_NAME_SPLIT = re.compile(r"[<>=!~\[; ]")
+
+
+def _normalize_py_name(name: str) -> str:
+    return name.strip().lower().replace("-", "_")
+
+
+def _load_python_dependencies(root: Path) -> set[str]:
+    """Union of dependency names declared in every requirements*.txt / pyproject.toml under
+    root, so bare Python imports can be told apart from genuine resolution gaps."""
+    deps: set[str] = set()
+
+    for req_file in root.rglob("requirements*.txt"):
+        if DEFAULT_EXCLUDED_DIRS & set(req_file.parts):
+            continue
+        for line in req_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line or line.startswith("-"):
+                continue
+            name = _PY_DEP_NAME_SPLIT.split(line, 1)[0].strip()
+            if name:
+                deps.add(_normalize_py_name(name))
+
+    for pyproject in root.rglob("pyproject.toml"):
+        if DEFAULT_EXCLUDED_DIRS & set(pyproject.parts):
+            continue
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        for dep in data.get("project", {}).get("dependencies", []):
+            name = _PY_DEP_NAME_SPLIT.split(dep, 1)[0].strip()
+            if name:
+                deps.add(_normalize_py_name(name))
+        poetry_deps = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
+        deps.update(_normalize_py_name(name) for name in poetry_deps)
+
+    return deps
 
 
 def _relpath_of(path: Path, root: Path) -> str | None:
@@ -159,12 +243,22 @@ class CallGraphBuilder:
                 if sym.kind in ("class", "interface"):
                     type_name_index.setdefault(sym.name, []).append(sym.fqn)
 
+        js_dependencies = _load_js_dependencies(root)
+        python_dependencies = _load_python_dependencies(root)
+
         import_edges: list[ImportEdge] = []
         call_edges: list[CallEdge] = []
         extends_edges: list[ExtendsEdge] = []
         for fr in files:
             import_edges.extend(
-                self._extract_imports(fr.parsed, root, all_relpaths, java_package_index)
+                self._extract_imports(
+                    fr.parsed,
+                    root,
+                    all_relpaths,
+                    java_package_index,
+                    js_dependencies,
+                    python_dependencies,
+                )
             )
             call_edges.extend(self._extract_calls(fr.parsed, fr.symbols, name_index))
             extends_edges.extend(self._extract_extends(fr.symbols, type_name_index))
@@ -231,11 +325,13 @@ class CallGraphBuilder:
         root: Path,
         all_relpaths: set[str],
         java_package_index: dict[str, str],
+        js_dependencies: set[str],
+        python_dependencies: set[str],
     ) -> list[ImportEdge]:
         if parsed.language == "python":
-            return self._python_imports(parsed, root, all_relpaths)
+            return self._python_imports(parsed, root, all_relpaths, python_dependencies)
         if parsed.language in ("javascript", "typescript"):
-            return self._js_imports(parsed, root, all_relpaths)
+            return self._js_imports(parsed, root, all_relpaths, js_dependencies)
         if parsed.language == "java":
             return self._java_imports(parsed, java_package_index)
         if parsed.language == "html":
@@ -245,12 +341,13 @@ class CallGraphBuilder:
         return []
 
     def _python_imports(
-        self, parsed: ParsedFile, root: Path, all_relpaths: set[str]
+        self, parsed: ParsedFile, root: Path, all_relpaths: set[str], python_dependencies: set[str]
     ) -> list[ImportEdge]:
         edges: list[ImportEdge] = []
         for node in _find_all(parsed.tree.root_node, {"import_statement", "import_from_statement"}):
             raw = node_text(node) or ""
             target_relpath: str | None = None
+            module: str | None = None
             if node.type == "import_statement":
                 name_node = node.child_by_field_name("name")
                 module = node_text(name_node)
@@ -269,12 +366,18 @@ class CallGraphBuilder:
                     module = node_text(module_node)
                     if module:
                         target_relpath = self._resolve_python_module(module, root, all_relpaths)
+            resolved = target_relpath is not None
+            top_level = (module or "").split(".")[0]
+            external = not resolved and (
+                top_level in _PY_STDLIB or _normalize_py_name(top_level) in python_dependencies
+            )
             edges.append(
                 ImportEdge(
                     source_relpath=parsed.relpath,
                     raw_specifier=raw,
                     target_relpath=target_relpath,
-                    resolved=target_relpath is not None,
+                    resolved=resolved,
+                    external=external,
                 )
             )
         return edges
@@ -294,7 +397,7 @@ class CallGraphBuilder:
         return None
 
     def _js_imports(
-        self, parsed: ParsedFile, root: Path, all_relpaths: set[str]
+        self, parsed: ParsedFile, root: Path, all_relpaths: set[str], js_dependencies: set[str]
     ) -> list[ImportEdge]:
         edges: list[ImportEdge] = []
         specifiers: list[str] = []
@@ -317,15 +420,35 @@ class CallGraphBuilder:
         file_dir = Path(parsed.path).parent
         for spec in specifiers:
             target_relpath: str | None = None
-            if spec.startswith(".") or spec.startswith("/"):
-                base = file_dir / spec if not spec.startswith("/") else root / spec.lstrip("/")
+            is_bare = not (spec.startswith(".") or spec.startswith("/"))
+            # Vite-style query/hash suffixes (?raw, ?url, ?worker, #foo) are load-time hints,
+            # not part of the filesystem path — strip them before resolving.
+            resolution_spec = spec.split("?", 1)[0].split("#", 1)[0]
+            base: Path | None = None
+            if not is_bare:
+                base = (
+                    file_dir / resolution_spec
+                    if not resolution_spec.startswith("/")
+                    else root / resolution_spec.lstrip("/")
+                )
                 target_relpath = self._resolve_js_path(base, root, all_relpaths)
+            resolved = target_relpath is not None
+            external = False
+            if not resolved:
+                if is_bare:
+                    package_name = _js_package_name(spec)
+                    external = package_name in js_dependencies or package_name in _NODE_BUILTINS
+                elif base is not None:
+                    # Points at a real file that just isn't a recognized source language
+                    # (markdown, images, JSON data, ...) - not a graph gap, just untracked.
+                    external = base.is_file()
             edges.append(
                 ImportEdge(
                     source_relpath=parsed.relpath,
                     raw_specifier=spec,
                     target_relpath=target_relpath,
-                    resolved=target_relpath is not None,
+                    resolved=resolved,
+                    external=external,
                 )
             )
         return edges
@@ -376,12 +499,17 @@ class CallGraphBuilder:
                     qualified = node_text(child)
                     break
             target_relpath = java_package_index.get(qualified) if qualified else None
+            resolved = target_relpath is not None
+            # java_package_index already covers every internal class in the project, so a
+            # miss here is never "we failed to find an internal file" — it's always a JDK
+            # class or a third-party library import (Spring, Lombok, ...).
             edges.append(
                 ImportEdge(
                     source_relpath=parsed.relpath,
                     raw_specifier=raw,
                     target_relpath=target_relpath,
-                    resolved=target_relpath is not None,
+                    resolved=resolved,
+                    external=not resolved,
                 )
             )
         return edges
@@ -401,10 +529,21 @@ class CallGraphBuilder:
             value = self._html_attr_value(start_tag, attr_name)
             if not value or value.startswith(("http://", "https://", "//")):
                 continue
-            target_relpath = self._resolve_js_path(file_dir / value, root, all_relpaths)
-            if target_relpath is None:
-                rel = _relpath_of(file_dir / value, root)
-                target_relpath = rel if rel in all_relpaths else None
+            # A "/"-prefixed src/href is root-relative, but pathlib's `dir / "/x"` silently
+            # discards `dir` and returns the filesystem-absolute "/x" — so try it relative to
+            # the HTML file's own directory first (the common single-app/Vite-root case),
+            # then fall back to the scan root (e.g. a `public/` mounted at the server root).
+            bases = [file_dir] if not value.startswith("/") else [file_dir, root]
+            rel_value = value.lstrip("/") if value.startswith("/") else value
+
+            target_relpath: str | None = None
+            for base_dir in bases:
+                target_relpath = self._resolve_js_path(base_dir / rel_value, root, all_relpaths)
+                if target_relpath is None:
+                    rel = _relpath_of(base_dir / rel_value, root)
+                    target_relpath = rel if rel in all_relpaths else None
+                if target_relpath is not None:
+                    break
             edges.append(
                 ImportEdge(
                     source_relpath=parsed.relpath,
