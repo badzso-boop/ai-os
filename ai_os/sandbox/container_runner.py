@@ -80,7 +80,13 @@ class SandboxProfile:
 SANDBOX_PROFILES: dict[str, SandboxProfile] = {
     "python": SandboxProfile(
         "ai-os-sandbox-python:3.12",
-        "pip install -q -r requirements.txt 2>/dev/null; pytest",
+        # `-p no:cacheprovider`: the worktree is mounted read-only, so
+        # pytest's cache plugin can never write `.pytest_cache/` into it —
+        # harmless but noisy `PytestCacheWarning`s on every single run.
+        # Disabled outright rather than redirected to /tmp: the container is
+        # single-shot and thrown away immediately after, so there is no
+        # cache to actually reuse between runs anyway.
+        "pip install -q -r requirements.txt 2>/dev/null; pytest -p no:cacheprovider",
     ),
     "javascript": SandboxProfile("node:20-alpine", "npm test"),
     "typescript": SandboxProfile("node:20-alpine", "npx tsc --noEmit && npm test"),
