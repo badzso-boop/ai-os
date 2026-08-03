@@ -87,25 +87,34 @@ Az AI-OS négy fő rétegre és egy megfigyelhetőségi (observability) felület
 
 ## ✅ Jelenlegi állapot: Phase 1 — Polyglot Analyzer & Knowledge Graph
 
-A tervezett architektúra első rétege már implementálva van és használható. Nem csak az (egyelőre még nem létező) Orchestrator Core belső komponense — a CLI önmagában, kézzel is futtatható bármelyik projektre a gépen.
+A tervezett architektúra első rétege (a fenti diagram bal oldali fele: **Polyglot Analyzer** + **Knowledge Engine**) már **implementálva van, tesztelve és éles repositoryn is validálva**. Ez egy 100%-ban determinisztikus, 0 AI tokent használó réteg — nem az (egyelőre még nem létező) Orchestrator Core belső komponense, hanem önállóan, kézzel is futtatható CLI eszköz bármelyik projektre a gépen.
+
+### Telepítés és gyorsindítás
 
 ```bash
-.venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+.venv/bin/pytest -q   # 37 teszt, ~1s
 
 # Projekt regisztrálása (a projekt-gyökerek egy külső, frissíthető registry-ben élnek: ~/.ai-os/projects.json)
 ai-os project add sajat-projekt /path/to/project
 ai-os project list
 
-# Szkennelés: szimbólumok, import/hívási/öröklési gráf, majd export JSON-be
+# Szkennelés: szimbólumok, import/hívási/öröklési gráf kinyerése, majd export JSON-be
 ai-os scan sajat-projekt --out graph.json
 
 # Egy konkrét szimbólum "skeleton stub"-jának megnézése (signature-only, body nélkül)
 ai-os scan sajat-projekt --skeleton "src/Foo.java::Foo.getX"
 ```
 
-A `--out graph.json` a teljes Knowledge Graph-ot (csomópontok, élek, szimbólum-metaadatok, skeleton stub-ok) menti ki egy ember által is olvasható, formázott JSON fájlba — ez egy állandó, elsőrangú funkció, nem csak belső debug kimenet.
+### Mit csinál pontosan
 
-Támogatott nyelvek: Python, Java, JavaScript/TypeScript, HTML, CSS, SQL. Lásd `CLAUDE.md` a modulok részletes leírásáért.
+- **Tree-sitter alapú, többnyelvű parser** (Python, Java, JavaScript, TypeScript, HTML, CSS, SQL) — kinyeri az osztályokat, interfészeket, függvényeket, metódusokat, SQL táblákat/view-kat, paraméterekkel, docstringgel, öröklési relációkkal együtt.
+- **Determinisztikus IMPORTS/CALLS/EXTENDS gráf** — nyelvenként saját import-feloldás (Python modul/csomag, JS/TS relatív + `require`, Java package-index, HTML `<script>`/`<link>`, CSS `@import`); a hívás- és öröklési élek névalapú, típuskövetkeztetés nélküli egyeztetéssel épülnek (a "Compiler First" elv szerint: soha nincs LLM a döntésben — több találat esetén minden jelölt megkapja az élt, `ambiguous=True` jelöléssel).
+- **Import-klasszifikáció**: minden fel nem oldott import automatikusan szétválasztásra kerül *várt külső függőségre* (`package.json`/`requirements.txt`/`pyproject.toml` + stdlib-listák alapján) és *valódi hiányra* — egy ~350 fájlos éles Java/TS/Python repositoryn ez a feloldatlan importok 70%-át helyesen "külső"-ként azonosította, a maradékból pedig két valódi bugot (Vite root-relatív útvonal, `?raw` query-suffix) is feltárt és kijavított.
+- **NetworkX Knowledge Graph** (`FileNode`/`ClassNode`/`FunctionNode`/`TypeNode` csomópontok, `CONTAINS`/`IMPORTS`/`CALLS`/`EXTENDS` élek), **k-hop context extraction** (vegyes irányú BFS: kimenő IMPORTS/EXTENDS, bejövő CALLS) és **signature-only "skeleton stub"** minden szimbólumhoz — ez táplálja majd a Context Cache-t a következő fázisban.
+- A teljes gráf **JSON-ba exportálható** (`--out graph.json`) — formázott, ember által is olvasható, önmagában használható funkció.
+
+Részletes modul-leírásért, ismert korlátokért (pl. a CALLS-feloldás ambiguity trade-offja) és a Phase 2+ tervekért lásd a `CLAUDE.md`-t.
 
 ---
 
