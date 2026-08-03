@@ -21,10 +21,13 @@ dependencies = [
     "networkx>=3.4,<4",
     "click>=8.1,<9",
     "rich>=13,<16",
+    "pydantic>=2.6,<3",
+    "sqlalchemy>=2.0.28,<3",
+    "aiosqlite>=0.20,<1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3,<10"]
+dev = ["pytest>=8.3,<10", "pytest-asyncio>=0.24,<1"]
 
 [project.scripts]
 ai-os = "ai_os.cli:main"
@@ -34,3 +37,6 @@ include = ["ai_os*"]
 
 [tool.setuptools.package-data]
 "ai_os.analyzer" = ["queries/*.scm"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
