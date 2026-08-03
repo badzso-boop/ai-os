@@ -1,0 +1,1 @@
+decoy build artifact
