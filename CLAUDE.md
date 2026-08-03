@@ -8,16 +8,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Phase 2 — Orchestrator Core & Git Engine — is also implemented and stable.** Everything under `ai_os/core/` (`models.py`, `db/`, `lock_manager.py`, `staging.py`, `planner.py`) is real, working code.
 
-**Phase 3a — MCP Provider Adapters & Router — is implemented and stable.** Everything under `ai_os/mcp/` (`adapters/`, `protocol_router.py`, `config.py`) is real, working code, verified against real providers. **This is explicitly a slice of doc 16's full Phase 3, not all of it** — `ai_os/mcp/mcp_server.py` (the JSON-RPC tool server exposing `propose_file_patch`/`fetch_symbol_definition`/`trigger_sandbox_validation` to a connected LLM client, doc 07 §3/§4) and `ai_os/sandbox/` (the Docker ephemeral runner, doc 10) are **not built yet**, along with `ui/` (Phase 4). They remain the *planned* architecture described in `docs/`, which stays the single source of truth for anything not covered below. Check the filesystem before assuming a module/command exists.
+**Phase 3a — MCP Provider Adapters & Router — is implemented and stable.** Everything under `ai_os/mcp/adapters/`, `ai_os/mcp/protocol_router.py`, `ai_os/mcp/config.py` is real, working code, verified against real providers.
+
+**Phase 3b — Ephemeral Sandbox & MCP Tool Server — is also implemented and stable.** `ai_os/sandbox/` (Docker-hardened validation runner, doc 10), `ai_os/mcp/mcp_server.py` (the real JSON-RPC/MCP tool server, doc 07 §3/§4), and `ai_os/core/task_runner.py` (the end-to-end orchestration loop with retries + HITL escalation) are all real, working, automated-tested code. **Explicit, deliberate scope boundary**: real autonomous tool-calling (an LLM actually invoking `propose_file_patch`/`trigger_sandbox_validation` mid-turn) only works through the **Anthropic CLI-session adapter** (`claude --mcp-config`) — Gemini/OpenRouter/Anthropic-API-key remain simple "prompt in, text out" completions with no tool-calling loop wired up. `ui/` (Phase 4) is **not built yet**. Check the filesystem before assuming a module/command exists.
 
 ### Build / test
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q          # 130 tests (129 passed + 1 documented xfail), ~4s — never makes a real network/provider call
+.venv/bin/pytest -q          # 172 tests (171 passed + 1 documented xfail), ~30s (real Docker containers) — never makes a real LLM/network-to-a-provider call
 cp .env.example .env         # fill in whichever provider credentials you have
 .venv/bin/ai-os llm list     # shows which providers are actually configured
 .venv/bin/ai-os llm test anthropic --prompt "say hi"   # REAL call, consumes real usage/quota
+.venv/bin/ai-os task run <project> --task-id T-1 --title "..." --description "..." \
+    --target-files "src/foo.py" --language python   # REAL end-to-end agent run, real usage/quota
 ```
 No `mypy`/`flake8`/`npm test`/`tsc` configured yet.
 
@@ -138,10 +142,35 @@ Copy `.env.example` to `.env` (gitignored) and fill in whichever providers are a
 
 ### Explicitly out of scope for Phase 3a (not silently dropped — see doc 16 §3 for what's still needed)
 
-- `ai_os/mcp/mcp_server.py` — the JSON-RPC tool server (`propose_file_patch`/`fetch_symbol_definition`/`trigger_sandbox_validation`, doc 07 §3/§4) that would let a connected LLM call back into AI-OS's own systems. This is a separate, larger task requiring an actual task-execution loop wired through `ai_os.core.staging`/`ai_os.core.lock_manager`.
-- `ai_os/sandbox/` — the Docker ephemeral validation runner (doc 10).
 - The OpenAI/ChatGPT adapter and any local/Ollama adapter — not requested.
 - Real TPM/RPM rate-limit tracking / cost-based backoff in `protocol_router.py` (doc 02 §2.2).
+
+---
+
+## Phase 3b — how it actually works
+
+Built by 2 parallel agents (sandbox, MCP server) against interface contracts fixed up front, then the orchestration loop (`task_runner.py`) done directly, same pattern as Phases 1/2/3a. **Explicit constraint honored throughout**: no real `claude` CLI invocation or live LLM call was made by me anywhere in this phase's development — real Docker containers and a real MCP client↔server protocol round-trip provide the automated proof instead; the actual "real LLM fixes real code" run is a deliberately manual, human-run step (see `ai-os task run` below).
+
+### Two verified, deliberate deviations from the docs
+
+- **`ai_os/sandbox/container_runner.py` shells out to the `docker` CLI via `asyncio.create_subprocess_exec`**, not the synchronous `docker` Python SDK doc 10 §4's blueprint uses (wrapped in `loop.run_in_executor`) — matches `staging.py`'s established convention for every other external process (git) in this codebase, and avoids a second heavyweight SDK.
+- **`ai_os/mcp/mcp_server.py` uses the real `mcp` PyPI package (`mcp>=2.0,<3`)**, reversing this project's usual "avoid heavy SDKs, use raw httpx" instinct (Phase 3a) — deliberately. Verified hard facts: `mcp` requires `starlette`+`sse-starlette`+`anyio` unconditionally even for pure-stdio use (a real dependency-weight cost), but the MCP wire protocol has real, evolving complexity — 5 protocol revisions exist as of writing, and the newest changed the transport model itself — and a hand-rolled server could silently speak the wrong shape against whatever revision the installed `claude` CLI negotiates, with no live-LLM test available to catch that. Correctness won over leanness here. The installed `mcp` 2.0.0's low-level `Server` API is constructor-based (`on_list_tools=`, `on_call_tool=` kwargs), not the decorator style (`@server.list_tools()`) shown in older tutorials — verify against the actually-installed version before assuming API shape if upgrading.
+
+### Module map
+
+- **`ai_os/sandbox/log_parser.py`** — `strip_ansi_codes()` (doc 10's own regex) + `build_feedback()` returning a generic `{status, exit_code, summary, output}` envelope (output truncated keeping the *tail*, since errors are almost always at the end of a log). **Deliberately not building** doc 10 §3's per-toolchain structured error parsing (`{file, line, column, rule, message}` for `tsc`, etc.) — a distinct, high-maintenance parser per compiler/linter/test-runner for marginal benefit over what an LLM can already read from clean text.
+- **`ai_os/sandbox/container_runner.py`** — `EphemeralSandboxRunner.run_validation(worktree_path, language) -> ValidationResult`. Applies doc 10 §1.1's hardening faithfully: `--rm`, `-v <worktree>:/app:ro`, `--network none`, `--memory=2g --cpus=2.0`, `--tmpfs /tmp:rw,noexec,nosuid,size=256m`, `--cap-drop=ALL --user 1000:1000`, unique `--name` for timeout-kill targeting. `SANDBOX_PROFILES` covers python/javascript/typescript/java (doc 10 §2 + JS alongside TS, matching Phase 1's own JS/TS sibling treatment) — Java is a real entry but not exercised by automated tests (heavy image, shared host). Tests use real Docker to prove `--network none` genuinely blocks an outbound connection and the read-only mount genuinely blocks a write — not just that the flags were passed.
+- **`ai_os/mcp/mcp_server.py`** — `ServerConfig.from_env()` reads `AI_OS_WORKTREE_PATH` (required)/`AI_OS_GRAPH_JSON_PATH`/`AI_OS_SANDBOX_LANGUAGE` (both optional, degrade only their one dependent tool). `propose_file_patch` writes into the given worktree path with path-traversal rejection (`..`/absolute-path escapes) — it does **not** create/destroy worktrees itself (doc 07 §4's blueprint duplicates that; the real lifecycle is `ai_os.core.staging.GitStagingEngine`, Phase 2). `fetch_symbol_definition` looks up a `KnowledgeEngine` node's `"stub"` by FQN. `trigger_sandbox_validation` calls `EphemeralSandboxRunner`. Tested both in-process (fast, fake sandbox runner) and via one real stdio subprocess round-trip using the `mcp` SDK's own client machinery (`initialize` → `tools/list` → `tools/call`, no LLM involved).
+- **`ai_os/core/task_runner.py`** (new, not in doc 14's tree — same flagged-deviation treatment as Phase 2's `core/models.py`) — `TaskRunner.run_task(task, language)`: acquire locks → create worktree → build Context Cache → loop up to `task.max_retries + 1` attempts calling an injectable `AgentTurnExecutor` then validating in the sandbox, feeding the previous attempt's (clean) output back into the next attempt's `AgentTurnContext` (the actual "prompt feedback loop") → merge on success, `abandon_task` + report `BLOCKED` on exhaustion (HITL escalation — just a status value today, nothing renders it, that's Phase 4). `build_claude_cli_agent_turn_executor` is the real production executor: spawns `claude -p ... --mcp-config ... --strict-mcp-config --allowedTools "mcp__ai_os__propose_file_patch mcp__ai_os__fetch_symbol_definition mcp__ai_os__trigger_sandbox_validation"` — unlike Phase 3a's adapter (zero tools, pure completion), this grants exactly the 3 AI-OS MCP tools. **This exact `--allowedTools` MCP-name-prefix convention has not been live-verified against a real `claude` CLI run** (per the no-manual-testing constraint) — it's the first thing to check on your first `ai-os task run`.
+- **CLI**: `ai-os task run <project> --task-id ... --title ... --description ... --target-files "a.py,b.py" --language python [--risk-level] [--max-retries] [--model]` — builds a `TaskNode`, scans the project fresh for a Context Cache, and runs it through the real pipeline. **Makes real `claude` CLI calls, consumes real usage** — the deliberate manual verification step for this phase, exactly like `ai-os llm test` was for Phase 3a.
+
+### Explicitly out of scope for Phase 3b (not silently dropped)
+
+- Tool-calling loops for Gemini/OpenRouter/Anthropic-API-key — only the Anthropic CLI-session path has real autonomous tool use (see "Repository status" above).
+- The Java sandbox profile isn't exercised by automated tests (heavy image, shared host) — the profile entry is real and correct, just untested here.
+- `TaskRunner`'s `on_status_change` hook is a plain callback, not wired to Phase 2's `TaskModel`/DB by default — deliberately thin (avoids assuming a `TaskModel` row already exists, since `epic_id` is a non-null FK); callers wire real persistence themselves.
+- Resuming a task after a process crash mid-retry-loop — matches `staging.py`'s existing "start fresh" policy.
+- The full Glass Box UI/HITL web flow (Phase 4) — `BLOCKED` status is just a value today, nothing renders/surfaces it to a human yet.
 
 ---
 
@@ -150,8 +179,9 @@ Copy `.env.example` to `.env` (gitignored) and fill in whichever providers are a
 Per `docs/14_PROJECT_DIRECTORY_STRUCTURE.md`:
 - `ai_os/analyzer/`, `ai_os/knowledge/`, `ai_os/registry.py`, `ai_os/cli.py` — **implemented (Phase 1)**, described above.
 - `ai_os/core/` — `models.py`, `db/` (`database.py`, `models.py`), `lock_manager.py`, `staging.py`, `planner.py` — **implemented (Phase 2)**, described above. `scheduler.py` (Dynamic Scheduler / LLM risk→model routing) — **not yet created** (needs Phase 3's MCP adapters).
-- `ai_os/mcp/` — `protocol_router.py`, `config.py`, `adapters/base_adapter.py`/`anthropic_adapter.py`/`gemini_adapter.py`/`openrouter_adapter.py` — **implemented (Phase 3a)**, described above. `mcp_server.py` and an OpenAI/local adapter — **not yet created**.
-- `ai_os/sandbox/` — `container_runner.py`, `log_parser.py` — **not yet created**.
+- `ai_os/mcp/` — `protocol_router.py`, `config.py`, `adapters/base_adapter.py`/`anthropic_adapter.py`/`gemini_adapter.py`/`openrouter_adapter.py` (Phase 3a) + `mcp_server.py` (Phase 3b) — **all implemented**, described above. An OpenAI/local adapter — not requested, not built.
+- `ai_os/sandbox/` — `container_runner.py`, `log_parser.py` — **implemented (Phase 3b)**, described above.
+- `ai_os/core/task_runner.py` — **implemented (Phase 3b)**, described above. Not in doc 14's original tree — a deliberate addition.
 - `ui/` — React + Vite + Tailwind + React Flow + Monaco frontend — **not yet created**.
 
 When starting Phase 3+ implementation, follow this structure unless there's a concrete reason to deviate, since the docs (and Phase 1/2's own test suites) assume it.
@@ -164,18 +194,18 @@ When starting Phase 3+ implementation, follow this structure unless there's a co
 | `02_ORCHESTRATOR_CORE.md` | DAG Planner (`TaskNode` schema), Dynamic Scheduler (risk→model matrix), async `LockManager` — **TaskNode/planner/lock_manager implemented in Phase 2** (see above); Dynamic Scheduler (risk→model routing) not built |
 | `03_POLYGLOT_ANALYZER.md` | Tree-sitter language support, symbol/call-graph extraction, incremental re-parse on file change (Phase 1 implements the non-incremental parts; incremental re-parse is not built) |
 | `04_KNOWLEDGE_CONTEXT_ENGINE.md` | Knowledge Graph node/edge types, skeleton/stub context compression, event-driven cache invalidation (Phase 1 implements the graph + stubs; event-driven invalidation is not built) |
-| `05_EXECUTION_VALIDATION_SANDBOX.md` | Git worktree isolation + ephemeral Docker validation + feedback/HITL state machine — worktree isolation implemented in Phase 2 (`staging.py`); Docker sandbox/HITL not built |
+| `05_EXECUTION_VALIDATION_SANDBOX.md` | Git worktree isolation + ephemeral Docker validation + feedback/HITL state machine — worktree isolation (Phase 2) + Docker sandbox (Phase 3b) + retry loop (`task_runner.py`) all **implemented**; full HITL UI (Phase 4) not built |
 | `06_GLASS_BOX_UI.md` | Observability dashboard concept, WebSocket event shape, HITL control panel options — not built |
-| `07_MCP_ADAPTER_ROUTER.md` | Kernel-vs-cores framing, exact MCP JSON-RPC tool schemas, Python blueprint — the JSON-RPC tool-server half (`mcp_server.py`) not built; the adapter/routing half **implemented in Phase 3a**, see `protocol_router.py`/`adapters/` above |
+| `07_MCP_ADAPTER_ROUTER.md` | Kernel-vs-cores framing, exact MCP JSON-RPC tool schemas, Python blueprint — **implemented**: adapter/routing half in Phase 3a, the JSON-RPC tool-server half in Phase 3b (`mcp_server.py`) |
 | `08_KNOWLEDGE_GRAPH_AND_SUBGRAPH_EXTRACTION.md` | Full graph schema, k-hop subgraph algorithm, skeleton extractor — **implemented in Phase 1**, see `graph_engine.py`/`skeleton_extractor.py` above |
 | `09_GIT_WORKTREE_STAGING_ENGINE.md` | Worktree lifecycle, async merge queue, rebase/re-validate rule — **implemented in Phase 2**, see `staging.py` above |
-| `10_EPHEMERAL_CONTAINER_SANDBOX_SPEC.md` | Container hardening flags, per-language sandbox profile matrix — not built |
+| `10_EPHEMERAL_CONTAINER_SANDBOX_SPEC.md` | Container hardening flags, per-language sandbox profile matrix — **implemented in Phase 3b**, see `sandbox/container_runner.py` above (structured per-toolchain error parsing deliberately not built, see `log_parser.py` note) |
 | `11_ORCHESTRATOR_TECH_STACK_AND_DEPL.md` | Language/library choices, SQLite storage design, Docker Compose layout, endpoint list — DB/storage design implemented in Phase 2 (`db/`); Docker Compose/REST/WebSocket endpoints not built |
 | `12_GLASS_BOX_UI_AND_HITL_SPEC.md` | Full 3-stage HITL workflow, UI component blueprint — not built |
 | `13_DB_SCHEMA_AND_MODELS.md` | ER diagram and SQLAlchemy 2.0 async models — **implemented in Phase 2**, see `db/models.py` above (Alembic migrations deliberately skipped) |
 | `14_PROJECT_DIRECTORY_STRUCTURE.md` | Intended repo layout — see "Intended directory layout" above for current-vs-planned |
 | `15_PROVIDER_AUTHENTICATION_AND_ROUTING.md` | Dual auth model per provider, `.env` shape, adapter blueprints — **implemented in Phase 3a with a deliberate deviation**: the "Native Web Session" cookie-scraping mode was rejected as ToS-risky and replaced with the official `claude` CLI scripting interface for Anthropic; see "Phase 3a" above |
-| `16_MVP_DEVELOPMENT_ROADMAP.md` | 4-phase build order: (1) Analyzer & Knowledge Graph **[done]**, (2) Core/Locking/Git **[done]**, (3) MCP Router & Sandbox **[partial — adapters/router done, sandbox/mcp_server not built]**, (4) Glass Box UI & HITL |
+| `16_MVP_DEVELOPMENT_ROADMAP.md` | 4-phase build order: (1) Analyzer & Knowledge Graph **[done]**, (2) Core/Locking/Git **[done]**, (3) MCP Router & Sandbox **[done, with the multi-provider-tool-calling scope boundary noted above]**, (4) Glass Box UI & HITL |
 | `17_YOUTUBE_SERIES_AND_OPENSOURCE_PLAN.md` | Content/marketing plan for a companion YouTube devlog series (not architecture) |
 | `18_YOUTUBE_PRODUCTION_AND_EDITING_GUIDE.md` | Video production/editing playbook for the same series (not architecture) |
 

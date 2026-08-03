@@ -1,8 +1,10 @@
 """AI-OS CLI: project registry, one-shot Polyglot Analyzer scans (Phase 1),
-and manual MCP provider adapter testing (Phase 3a)."""
+manual MCP provider adapter testing (Phase 3a), and running one task
+end-to-end through the sandboxed agent loop (Phase 3b)."""
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import time
 from pathlib import Path
 
@@ -13,9 +15,14 @@ from rich.table import Table
 from ai_os import registry
 from ai_os.analyzer.call_graph_builder import CallGraphBuilder
 from ai_os.analyzer.languages import LANGUAGES
+from ai_os.core.lock_manager import LockManager
+from ai_os.core.models import TaskNode
+from ai_os.core.staging import GitStagingEngine
+from ai_os.core.task_runner import TaskRunner, build_claude_cli_agent_turn_executor
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import LLMTaskRequest
 from ai_os.mcp.config import load_configured_adapters
+from ai_os.sandbox.container_runner import EphemeralSandboxRunner
 
 console = Console()
 
@@ -244,6 +251,90 @@ def llm_list() -> None:
     for name in sorted(adapters):
         table.add_row(name)
     console.print(table)
+
+
+@main.group()
+def task() -> None:
+    """Run one task end-to-end through the sandboxed agent loop (Phase 3b)."""
+
+
+@task.command("run")
+@click.argument("name_or_path")
+@click.option("--task-id", required=True, help="Unique task id, e.g. TASK-101.")
+@click.option("--title", required=True)
+@click.option("--description", required=True, help="What the agent should do.")
+@click.option(
+    "--target-files",
+    required=True,
+    help="Comma-separated files this task reads context around AND is expected to write.",
+)
+@click.option("--language", required=True, type=click.Choice(sorted(["python", "javascript", "typescript", "java"])))
+@click.option("--risk-level", default="MEDIUM", type=click.Choice(["LOW", "MEDIUM", "HIGH", "CRITICAL"]))
+@click.option("--max-retries", default=2, show_default=True)
+@click.option("--model", default="claude-sonnet-4-5", show_default=True)
+def task_run(
+    name_or_path: str,
+    task_id: str,
+    title: str,
+    description: str,
+    target_files: str,
+    language: str,
+    risk_level: str,
+    max_retries: int,
+    model: str,
+) -> None:
+    """Run TASK-ID against NAME_OR_PATH's real repo, through the real Git
+    worktree/lock/sandbox pipeline, using a REAL `claude` CLI agent turn
+    (via --mcp-config) that can call propose_file_patch/fetch_symbol_definition/
+    trigger_sandbox_validation. This makes real, non-trivial usage/quota calls —
+    it is the manual end-to-end verification step, not part of the test suite.
+    """
+    try:
+        root = registry.resolve(name_or_path)
+    except registry.ProjectPathError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    files = [f.strip() for f in target_files.split(",") if f.strip()]
+    task_node = TaskNode(
+        id=task_id,
+        title=title,
+        description=description,
+        risk_level=risk_level,
+        target_files=files,
+        write_set=set(files),
+        max_retries=max_retries,
+    )
+
+    console.print(f"Scanning {root} to build the Context Cache...")
+    scan_result = CallGraphBuilder().scan(root)
+    engine = KnowledgeEngine()
+    engine.build_from_scan(scan_result)
+
+    with tempfile.TemporaryDirectory(prefix="ai-os-task-graph-") as tmp_dir:
+        graph_json_path = Path(tmp_dir) / "graph.json"
+        engine.to_json(graph_json_path)
+
+        agent_turn_executor = build_claude_cli_agent_turn_executor(
+            repo_root=root,
+            graph_json_path=graph_json_path,
+            sandbox_language=language,
+            model=model,
+        )
+        runner = TaskRunner(
+            lock_manager=LockManager(),
+            staging=GitStagingEngine(root),
+            knowledge_engine=engine,
+            agent_turn_executor=agent_turn_executor,
+            sandbox_runner=EphemeralSandboxRunner(),
+            on_status_change=lambda tid, status: console.print(f"[dim]{tid}: {status}[/dim]"),
+        )
+        result = asyncio.run(runner.run_task(task_node, language=language))
+
+    color = "green" if result.status == "COMPLETED" else "red"
+    console.print(f"\n[bold {color}]{result.status}[/bold {color}] after {result.attempts} attempt(s).")
+    if result.final_output:
+        console.print("\nLast validation output:")
+        console.print(result.final_output)
 
 
 if __name__ == "__main__":
