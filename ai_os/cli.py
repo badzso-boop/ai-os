@@ -1,6 +1,7 @@
 """AI-OS CLI: project registry, one-shot Polyglot Analyzer scans (Phase 1),
-manual MCP provider adapter testing (Phase 3a), and running one task
-end-to-end through the sandboxed agent loop (Phase 3b)."""
+manual MCP provider adapter testing (Phase 3a), running one task end-to-end
+through the sandboxed agent loop (Phase 3b), and decomposing a high-level
+request into a multi-task DAG distributed across models (Phase 4a)."""
 from __future__ import annotations
 
 import asyncio
@@ -15,16 +16,22 @@ from rich.table import Table
 from ai_os import registry
 from ai_os.analyzer.call_graph_builder import CallGraphBuilder
 from ai_os.analyzer.languages import LANGUAGES
+from ai_os.core.epic_planner import EpicPlanError, decompose
+from ai_os.core.epic_runner import EpicRunner
 from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
+from ai_os.core.scheduler import DynamicScheduler
 from ai_os.core.staging import GitStagingEngine
 from ai_os.core.task_runner import TaskRunner, build_claude_cli_agent_turn_executor
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import LLMTaskRequest
 from ai_os.mcp.config import load_configured_adapters
+from ai_os.mcp.protocol_router import ProtocolRouter
 from ai_os.sandbox.container_runner import EphemeralSandboxRunner
 
 console = Console()
+
+_LANGUAGE_CHOICES = sorted(["python", "javascript", "typescript", "java"])
 
 
 @click.group()
@@ -335,6 +342,93 @@ def task_run(
     if result.final_output:
         console.print("\nLast validation output:")
         console.print(result.final_output)
+
+
+@main.group()
+def epic() -> None:
+    """Decompose a high-level request into a multi-task DAG and run it,
+    distributing tasks across models by risk level (Phase 4a)."""
+
+
+def _print_plan_table(tasks, assignments) -> None:
+    table = Table(title="Proposed DAG plan")
+    table.add_column("ID")
+    table.add_column("Risk")
+    table.add_column("Provider→Model")
+    table.add_column("Depends on")
+    table.add_column("Writes")
+    table.add_column("Title")
+    for t in tasks:
+        a = assignments[t.id]
+        model = a.model or "(provider default)"
+        table.add_row(
+            t.id, t.risk_level, f"{a.provider} → {model}",
+            ", ".join(t.dependencies) or "-", ", ".join(sorted(t.write_set)) or "-", t.title,
+        )
+    console.print(table)
+
+
+@epic.command("run")
+@click.argument("name_or_path")
+@click.option("--prompt", required=True, help="High-level request to decompose, e.g. 'add JWT auth'.")
+@click.option("--language", required=True, type=click.Choice(_LANGUAGE_CHOICES))
+@click.option("--yes", is_flag=True, help="Skip the plan-review approval gate and run immediately.")
+def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
+    """Decompose PROMPT against NAME_OR_PATH into a task DAG, show the plan for
+    approval (HITL Stage 1), then execute it — routing each task to a model by
+    its risk level via the providers configured in .env. Makes REAL LLM calls
+    (planning + each task) and consumes real usage/quota.
+    """
+    try:
+        root = registry.resolve(name_or_path)
+    except registry.ProjectPathError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    adapters = load_configured_adapters()
+    if not adapters:
+        raise click.ClickException(
+            "No LLM providers configured. Copy .env.example to .env and add credentials."
+        )
+    router = ProtocolRouter(adapters)
+    scheduler = DynamicScheduler(router)
+
+    console.print(f"Scanning {root} to ground the planner...")
+    scan_result = CallGraphBuilder().scan(root)
+    engine = KnowledgeEngine()
+    engine.build_from_scan(scan_result)
+
+    plan_assignment = scheduler.planning_assignment()
+    console.print(
+        f"Decomposing the request with [bold]{plan_assignment.provider}[/bold] "
+        f"({plan_assignment.model or 'provider default'})... this is a real LLM call."
+    )
+    try:
+        tasks = asyncio.run(
+            decompose(prompt, engine, adapters[plan_assignment.provider], model=plan_assignment.model)
+        )
+    except EpicPlanError as exc:
+        raise click.ClickException(f"Planning failed: {exc}") from exc
+
+    runner = EpicRunner(
+        repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
+        sandbox_runner=EphemeralSandboxRunner(),
+        on_status_change=lambda tid, status: console.print(f"[dim]{tid}: {status}[/dim]"),
+    )
+    assignments = runner.plan_assignments(tasks)
+    _print_plan_table(tasks, assignments)
+
+    # HITL Stage 1: Plan Review gate (doc 12 §2.1). The React UI version is
+    # Phase 4b; the approval gate itself works fine in a terminal.
+    if not yes and not click.confirm("\nApprove this plan and execute the DAG?", default=False):
+        console.print("Aborted — no tasks were run.")
+        return
+
+    result = asyncio.run(runner.run_epic(tasks))
+
+    console.print("\n[bold]Epic finished.[/bold]")
+    console.print(f"  [green]Completed[/green]: {', '.join(result.completed) or '-'}")
+    console.print(f"  [red]Blocked[/red]:   {', '.join(result.blocked) or '-'}")
+    console.print(f"  [yellow]Skipped[/yellow]:   {', '.join(result.skipped) or '-'}")
 
 
 if __name__ == "__main__":

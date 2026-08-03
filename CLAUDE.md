@@ -10,18 +10,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Phase 3a — MCP Provider Adapters & Router — is implemented and stable.** Everything under `ai_os/mcp/adapters/`, `ai_os/mcp/protocol_router.py`, `ai_os/mcp/config.py` is real, working code, verified against real providers.
 
-**Phase 3b — Ephemeral Sandbox & MCP Tool Server — is also implemented and stable.** `ai_os/sandbox/` (Docker-hardened validation runner, doc 10), `ai_os/mcp/mcp_server.py` (the real JSON-RPC/MCP tool server, doc 07 §3/§4), and `ai_os/core/task_runner.py` (the end-to-end orchestration loop with retries + HITL escalation) are all real, working, automated-tested code. **Explicit, deliberate scope boundary**: real autonomous tool-calling (an LLM actually invoking `propose_file_patch`/`trigger_sandbox_validation` mid-turn) only works through the **Anthropic CLI-session adapter** (`claude --mcp-config`) — Gemini/OpenRouter/Anthropic-API-key remain simple "prompt in, text out" completions with no tool-calling loop wired up. `ui/` (Phase 4) is **not built yet**. Check the filesystem before assuming a module/command exists.
+**Phase 3b — Ephemeral Sandbox & MCP Tool Server — is also implemented and stable.** `ai_os/sandbox/` (Docker-hardened validation runner, doc 10), `ai_os/mcp/mcp_server.py` (the real JSON-RPC/MCP tool server, doc 07 §3/§4), and `ai_os/core/task_runner.py` (the end-to-end orchestration loop with retries + HITL escalation) are all real, working, automated-tested code. Verified live end-to-end by the user: a real Claude model autonomously called the MCP tools, fixed real code, the sandbox validated it, and it merged to main.
+
+**Phase 4a — Epic Decomposition & Multi-Model Distribution — is implemented and stable.** `ai_os/core/epic_planner.py` (LLM decomposes a high-level request into a validated `TaskNode` DAG), `ai_os/core/scheduler.py` (`DynamicScheduler`: risk_level → provider+model), `ai_os/core/epic_runner.py` (runs the DAG batch-by-batch, tasks within a batch concurrent), and the completion-based agent executor in `task_runner.py` are all real, automated-tested code. **`ui/` (Phase 4b — the React Glass Box UI) is NOT built yet.** The plan-review HITL gate exists at the CLI level (`ai-os epic run` prompts for approval before executing), not as a web UI. **Scope boundary (unchanged from 3b)**: autonomous MCP tool-calling only works through the Anthropic CLI-session adapter; Gemini/OpenRouter/Anthropic-API-key tasks use the completion write-back path instead (the model returns full file contents, AI-OS writes them). Check the filesystem before assuming a module/command exists.
 
 ### Build / test
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q          # 172 tests (171 passed + 1 documented xfail), ~30s (real Docker containers) — never makes a real LLM/network-to-a-provider call
+.venv/bin/pytest -q          # 204 tests (203 passed + 1 documented xfail), ~30s (real Docker containers) — never makes a real LLM/network-to-a-provider call
 cp .env.example .env         # fill in whichever provider credentials you have
 .venv/bin/ai-os llm list     # shows which providers are actually configured
 .venv/bin/ai-os llm test anthropic --prompt "say hi"   # REAL call, consumes real usage/quota
 .venv/bin/ai-os task run <project> --task-id T-1 --title "..." --description "..." \
-    --target-files "src/foo.py" --language python   # REAL end-to-end agent run, real usage/quota
+    --target-files "src/foo.py" --language python   # REAL single-task agent run, real usage/quota
+.venv/bin/ai-os epic run <project> --prompt "add JWT auth" --language python  # REAL multi-task DAG, real usage/quota
 ```
 No `mypy`/`flake8`/`npm test`/`tsc` configured yet.
 
@@ -171,7 +174,32 @@ Built by 2 parallel agents (sandbox, MCP server) against interface contracts fix
 - The Java sandbox profile isn't exercised by automated tests (heavy image, shared host) — the profile entry is real and correct, just untested here.
 - `TaskRunner`'s `on_status_change` hook is a plain callback, not wired to Phase 2's `TaskModel`/DB by default — deliberately thin (avoids assuming a `TaskModel` row already exists, since `epic_id` is a non-null FK); callers wire real persistence themselves.
 - Resuming a task after a process crash mid-retry-loop — matches `staging.py`'s existing "start fresh" policy.
-- The full Glass Box UI/HITL web flow (Phase 4) — `BLOCKED` status is just a value today, nothing renders/surfaces it to a human yet.
+- The full Glass Box UI/HITL web flow (Phase 4b) — the plan-review gate exists at the CLI level (Phase 4a); nothing renders the DAG/logs/diffs in a browser yet.
+
+---
+
+## Phase 4a — how it actually works
+
+Closes the gap between "run one hand-specified task" (Phase 3b's `ai-os task run`) and "give it a high-level request and have it split the work across models" (`ai-os epic run`). Built directly (not via parallel agents — the pieces form a tight scheduler → executor → planner → runner chain).
+
+### Module map
+
+- **`ai_os/core/scheduler.py`** — `DynamicScheduler`: maps a task's `risk_level` to a concrete `Assignment(provider, model)`. Reuses `ProtocolRouter.resolve_provider` (Phase 3a) for the provider half and adds the missing model half via `DEFAULT_MODEL_MATRIX` (anthropic: LOW→`haiku`, MEDIUM/HIGH→`sonnet`, CRITICAL→`opus` — CLI aliases, so they never go stale on a model rename; gemini/openrouter default to `None` = the adapter's own default). Overridable per cell via `AI_OS_MODEL_<PROVIDER>_<RISK>` env vars. `planning_assignment()` routes decomposition itself as CRITICAL (strongest configured model). **Still deliberately NOT the full doc 02 §2.2 scheduler** — no TPM/RPM tracking or cost-based backoff (same deferral `protocol_router.py` documents).
+- **`ai_os/core/epic_planner.py`** — `decompose(user_prompt, engine, adapter, model)`: builds a compact repo summary from the `KnowledgeEngine` (files + symbol FQNs, to ground task paths in real files), prompts the LLM for a JSON task array, and parses it defensively. `parse_task_plan` strips markdown fences, extracts the outermost `[...]`, `json.loads`, tolerates extra keys, and pydantic-validates each entry into a `TaskNode`; `EpicPlanError` carries the raw text. `decompose` retries once with the parse error fed back to the model (mirroring the sandbox feedback loop), then runs the plan through the deterministic `planner.build_graph`/`validate_acyclic` to reject cycles/dangling deps before anything executes.
+- **completion-based executor (`task_runner.py`)** — `build_completion_agent_turn_executor(adapter, model)`: for providers WITHOUT autonomous tool use (Gemini/OpenRouter/Anthropic-API-key), sends task+context+(on retry)previous-validation-output as a plain completion, asks for full new file contents in a sentinel-delimited format (`<<<AI_OS_FILE: path>>> ... <<<AI_OS_END>>>` — deliberately NOT markdown fences, which collide with code containing ```), and AI-OS itself writes the parsed files into the worktree (with the same path-traversal rejection as `mcp_server.py`). The existing `TaskRunner` sandbox-validation + retry loop then works identically. **Known limitation, flagged**: asking for full file contents means very large files can hit the model's output limit / truncate — fine for the focused single-responsibility tasks the DAG produces; a diff-based protocol would lift it, not built.
+- **`ai_os/core/epic_runner.py`** — `EpicRunner.run_epic(tasks)`: `planner.topological_batches` gives dependency generations; tasks within a generation run concurrently via `asyncio.gather` **sharing one `LockManager` + one `GitStagingEngine`** (so Phase 2's concurrency guarantees apply directly — the integration test in `test_epic_runner.py` proves a real diamond DAG merges in dependency order against real git worktrees). Each task is routed by the scheduler and gets the right executor kind (anthropic-CLI-session → real MCP tool use; everything else → completion write-back). Between generations the repo is re-scanned so later tasks see earlier merged work. A task whose dependency ended `BLOCKED` (or was itself skipped) is skipped, not run.
+- **CLI**: `ai-os epic run <project> --prompt "..." --language python [--yes]` — decomposes, prints the proposed DAG as a Rich table (id, risk, provider→model, deps, write-set), and **pauses for approval (HITL Stage 1, doc 12 §2.1) unless `--yes`** before executing. Makes real LLM calls (planning + every task).
+
+### Testing (no real LLM/Docker anywhere in the automated suite)
+
+`test_scheduler.py` (pure routing), `test_completion_executor.py` (parser + fake-adapter write-back, path-traversal rejection), `test_epic_planner.py` (canned plan JSON incl. malformed-then-valid retry, cycle rejection), `test_epic_runner.py` (**real** `LockManager`+`GitStagingEngine`+disposable git repo, fake completion adapter, fake sandbox — proves a diamond DAG executes in dependency order, per-risk model routing is observable, and a blocked task's dependents are skipped), `test_cli_epic.py` (plan-review gate: declined→no execution, approved/`--yes`→executes).
+
+### Explicitly out of scope for Phase 4a (not silently dropped)
+
+- Tool-calling loops for non-Anthropic-CLI providers — unchanged from Phase 3b; those use the completion write-back path.
+- Diff-based patching for large files (completion executor sends whole files).
+- The React Glass Box UI, WebSocket streaming, runtime preemption (Stage 2), Monaco manual-edit recovery (Stage 3) — Phase 4b.
+- Real TPM/RPM/cost-based scheduling (doc 02 §2.2) — still deferred.
 
 ---
 
@@ -179,11 +207,11 @@ Built by 2 parallel agents (sandbox, MCP server) against interface contracts fix
 
 Per `docs/14_PROJECT_DIRECTORY_STRUCTURE.md`:
 - `ai_os/analyzer/`, `ai_os/knowledge/`, `ai_os/registry.py`, `ai_os/cli.py` — **implemented (Phase 1)**, described above.
-- `ai_os/core/` — `models.py`, `db/` (`database.py`, `models.py`), `lock_manager.py`, `staging.py`, `planner.py` — **implemented (Phase 2)**, described above. `scheduler.py` (Dynamic Scheduler / LLM risk→model routing) — **not yet created** (needs Phase 3's MCP adapters).
+- `ai_os/core/` — `models.py`, `db/` (`database.py`, `models.py`), `lock_manager.py`, `staging.py`, `planner.py` (Phase 2) + `scheduler.py` (Dynamic Scheduler / risk→model, Phase 4a) — **implemented**, described above.
 - `ai_os/mcp/` — `protocol_router.py`, `config.py`, `adapters/base_adapter.py`/`anthropic_adapter.py`/`gemini_adapter.py`/`openrouter_adapter.py` (Phase 3a) + `mcp_server.py` (Phase 3b) — **all implemented**, described above. An OpenAI/local adapter — not requested, not built.
 - `ai_os/sandbox/` — `container_runner.py`, `log_parser.py` — **implemented (Phase 3b)**, described above.
-- `ai_os/core/task_runner.py` — **implemented (Phase 3b)**, described above. Not in doc 14's original tree — a deliberate addition.
-- `ui/` — React + Vite + Tailwind + React Flow + Monaco frontend — **not yet created**.
+- `ai_os/core/task_runner.py` (Phase 3b), `ai_os/core/epic_planner.py` + `ai_os/core/epic_runner.py` (Phase 4a) — **implemented**, described above. Not in doc 14's original tree — deliberate additions.
+- `ui/` — React + Vite + Tailwind + React Flow + Monaco frontend (Phase 4b) — **not yet created**.
 
 When starting Phase 3+ implementation, follow this structure unless there's a concrete reason to deviate, since the docs (and Phase 1/2's own test suites) assume it.
 
@@ -192,7 +220,7 @@ When starting Phase 3+ implementation, follow this structure unless there's a co
 | Doc | Subsystem |
 | --- | --- |
 | `01_ARCHITECTURE_OVERVIEW.md` | Full system diagram, end-to-end flow, responsibility matrix |
-| `02_ORCHESTRATOR_CORE.md` | DAG Planner (`TaskNode` schema), Dynamic Scheduler (risk→model matrix), async `LockManager` — **TaskNode/planner/lock_manager implemented in Phase 2** (see above); Dynamic Scheduler (risk→model routing) not built |
+| `02_ORCHESTRATOR_CORE.md` | DAG Planner (`TaskNode` schema), Dynamic Scheduler (risk→model matrix), async `LockManager` — **TaskNode/planner/lock_manager in Phase 2, LLM decomposition + risk→model scheduler in Phase 4a** (`epic_planner.py`/`scheduler.py`); TPM/RPM/cost-based scheduling still not built |
 | `03_POLYGLOT_ANALYZER.md` | Tree-sitter language support, symbol/call-graph extraction, incremental re-parse on file change (Phase 1 implements the non-incremental parts; incremental re-parse is not built) |
 | `04_KNOWLEDGE_CONTEXT_ENGINE.md` | Knowledge Graph node/edge types, skeleton/stub context compression, event-driven cache invalidation (Phase 1 implements the graph + stubs; event-driven invalidation is not built) |
 | `05_EXECUTION_VALIDATION_SANDBOX.md` | Git worktree isolation + ephemeral Docker validation + feedback/HITL state machine — worktree isolation (Phase 2) + Docker sandbox (Phase 3b) + retry loop (`task_runner.py`) all **implemented**; full HITL UI (Phase 4) not built |
@@ -206,7 +234,7 @@ When starting Phase 3+ implementation, follow this structure unless there's a co
 | `13_DB_SCHEMA_AND_MODELS.md` | ER diagram and SQLAlchemy 2.0 async models — **implemented in Phase 2**, see `db/models.py` above (Alembic migrations deliberately skipped) |
 | `14_PROJECT_DIRECTORY_STRUCTURE.md` | Intended repo layout — see "Intended directory layout" above for current-vs-planned |
 | `15_PROVIDER_AUTHENTICATION_AND_ROUTING.md` | Dual auth model per provider, `.env` shape, adapter blueprints — **implemented in Phase 3a with a deliberate deviation**: the "Native Web Session" cookie-scraping mode was rejected as ToS-risky and replaced with the official `claude` CLI scripting interface for Anthropic; see "Phase 3a" above |
-| `16_MVP_DEVELOPMENT_ROADMAP.md` | 4-phase build order: (1) Analyzer & Knowledge Graph **[done]**, (2) Core/Locking/Git **[done]**, (3) MCP Router & Sandbox **[done, with the multi-provider-tool-calling scope boundary noted above]**, (4) Glass Box UI & HITL |
+| `16_MVP_DEVELOPMENT_ROADMAP.md` | 4-phase build order: (1) Analyzer & Knowledge Graph **[done]**, (2) Core/Locking/Git **[done]**, (3) MCP Router & Sandbox **[done]**, (4) Glass Box UI & HITL **[4a done: Epic decomposition + multi-model distribution + CLI plan-review gate; 4b (React UI/WebSocket/Monaco) not built]** |
 | `17_YOUTUBE_SERIES_AND_OPENSOURCE_PLAN.md` | Content/marketing plan for a companion YouTube devlog series (not architecture) |
 | `18_YOUTUBE_PRODUCTION_AND_EDITING_GUIDE.md` | Video production/editing playbook for the same series (not architecture) |
 

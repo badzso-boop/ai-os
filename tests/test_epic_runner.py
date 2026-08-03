@@ -120,8 +120,13 @@ async def test_per_task_model_routing(git_repo: Path):
     # LOW and CRITICAL tasks routed to different models within the same provider.
     tasks = [_task("LOWTASK", risk="LOW"), _task("CRIT", risk="CRITICAL", deps=["LOWTASK"])]
     adapter = _FilePerTaskAdapter()
-    # Give the fake provider a model matrix via env so routing is observable.
-    router = ProtocolRouter({"gemini": adapter})
+    # Route every risk level to the fake "gemini" provider (the default order
+    # sends CRITICAL only to anthropic), so this test can observe per-risk
+    # model selection within one provider.
+    router = ProtocolRouter(
+        {"gemini": adapter},
+        risk_provider_order={level: ["gemini"] for level in ("LOW", "MEDIUM", "HIGH", "CRITICAL")},
+    )
     scheduler = DynamicScheduler(
         router, environ={"AI_OS_MODEL_GEMINI_LOW": "flash-lite", "AI_OS_MODEL_GEMINI_CRITICAL": "flash-pro"}
     )
