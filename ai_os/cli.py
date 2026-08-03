@@ -26,7 +26,7 @@ from ai_os.core.task_runner import TaskRunner, build_claude_cli_agent_turn_execu
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import LLMTaskRequest
 from ai_os.mcp.config import load_configured_adapters
-from ai_os.mcp.protocol_router import ProtocolRouter
+from ai_os.mcp.protocol_router import ProtocolRouter, risk_provider_order_from_env
 from ai_os.sandbox.container_runner import EphemeralSandboxRunner
 
 console = Console()
@@ -389,7 +389,7 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
         raise click.ClickException(
             "No LLM providers configured. Copy .env.example to .env and add credentials."
         )
-    router = ProtocolRouter(adapters)
+    router = ProtocolRouter(adapters, risk_provider_order=risk_provider_order_from_env())
     scheduler = DynamicScheduler(router)
 
     console.print(f"Scanning {root} to ground the planner...")

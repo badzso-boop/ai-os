@@ -6,7 +6,12 @@ from __future__ import annotations
 import pytest
 
 from ai_os.mcp.adapters.base_adapter import BaseMCPAdapter, LLMTaskRequest, LLMTaskResponse, TokenUsage
-from ai_os.mcp.protocol_router import DEFAULT_RISK_PROVIDER_ORDER, NoAdapterConfiguredError, ProtocolRouter
+from ai_os.mcp.protocol_router import (
+    DEFAULT_RISK_PROVIDER_ORDER,
+    NoAdapterConfiguredError,
+    ProtocolRouter,
+    risk_provider_order_from_env,
+)
 
 
 class _FakeAdapter(BaseMCPAdapter):
@@ -72,5 +77,31 @@ async def test_custom_risk_provider_order_is_respected():
         {"openrouter": _FakeAdapter("openrouter"), "anthropic": _FakeAdapter("anthropic")},
         risk_provider_order={"LOW": ["anthropic", "openrouter"]},
     )
+    response = await router.execute_for_risk("LOW", _request())
+    assert response.provider == "anthropic"
+
+
+def test_env_provider_order_defaults_when_unset():
+    order = risk_provider_order_from_env(environ={})
+    assert order == DEFAULT_RISK_PROVIDER_ORDER
+    # a copy, not the shared module-level dict (mutating it must not leak)
+    order["LOW"].append("mutation")
+    assert "mutation" not in DEFAULT_RISK_PROVIDER_ORDER["LOW"]
+
+
+def test_env_provider_order_override_single_level():
+    order = risk_provider_order_from_env(environ={"AI_OS_PROVIDER_ORDER_MEDIUM": "anthropic, openrouter"})
+    assert order["MEDIUM"] == ["anthropic", "openrouter"]
+    # other levels keep their defaults
+    assert order["LOW"] == DEFAULT_RISK_PROVIDER_ORDER["LOW"]
+
+
+async def test_env_provider_order_actually_changes_routing():
+    order = risk_provider_order_from_env(environ={"AI_OS_PROVIDER_ORDER_LOW": "anthropic,openrouter"})
+    router = ProtocolRouter(
+        {"gemini": _FakeAdapter("gemini"), "anthropic": _FakeAdapter("anthropic")},
+        risk_provider_order=order,
+    )
+    # Default LOW order would pick gemini first; the env override puts anthropic first.
     response = await router.execute_for_risk("LOW", _request())
     assert response.provider == "anthropic"
