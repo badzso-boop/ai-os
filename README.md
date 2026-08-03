@@ -85,6 +85,30 @@ Az AI-OS négy fő rétegre és egy megfigyelhetőségi (observability) felület
 
 ---
 
+## ✅ Jelenlegi állapot: Phase 1 — Polyglot Analyzer & Knowledge Graph
+
+A tervezett architektúra első rétege már implementálva van és használható. Nem csak az (egyelőre még nem létező) Orchestrator Core belső komponense — a CLI önmagában, kézzel is futtatható bármelyik projektre a gépen.
+
+```bash
+.venv/bin/pip install -e ".[dev]"
+
+# Projekt regisztrálása (a projekt-gyökerek egy külső, frissíthető registry-ben élnek: ~/.ai-os/projects.json)
+ai-os project add sajat-projekt /path/to/project
+ai-os project list
+
+# Szkennelés: szimbólumok, import/hívási/öröklési gráf, majd export JSON-be
+ai-os scan sajat-projekt --out graph.json
+
+# Egy konkrét szimbólum "skeleton stub"-jának megnézése (signature-only, body nélkül)
+ai-os scan sajat-projekt --skeleton "src/Foo.java::Foo.getX"
+```
+
+A `--out graph.json` a teljes Knowledge Graph-ot (csomópontok, élek, szimbólum-metaadatok, skeleton stub-ok) menti ki egy ember által is olvasható, formázott JSON fájlba — ez egy állandó, elsőrangú funkció, nem csak belső debug kimenet.
+
+Támogatott nyelvek: Python, Java, JavaScript/TypeScript, HTML, CSS, SQL. Lásd `CLAUDE.md` a modulok részletes leírásáért.
+
+---
+
 ## 📌 Igazságforrás (Single Source of Truth)
 
 Ez a repository és a benne található `docs/` mappában lévő specifikációk képezik az **AI-OS** projekt egyetlen igazságforrását. Bármely új modul, interfész vagy osztály fejlesztése során a determinisztikus és heurisztikus feladatok szigorú szétválasztását kell alkalmazni.

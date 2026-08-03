@@ -4,9 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-This repository currently contains **only specifications** (`docs/`) and a `README.md` — there is no implemented code yet (`ai_os/` and `ui/` do not exist on disk). Everything below describes the *planned* architecture as specified in `docs/`, which is the project's single source of truth. Do not assume any module, command, build tool, or test suite exists until it has actually been created — check the filesystem before relying on paths from the docs.
+**Phase 1 (Polyglot Analyzer & Knowledge Graph) is implemented** — `ai_os/analyzer/`, `ai_os/knowledge/`, `ai_os/registry.py`, `ai_os/cli.py` exist on disk with a passing pytest suite under `tests/`. Everything else described below (`core/`, `mcp/`, `sandbox/`, `ui/`) is still just the *planned* architecture from `docs/`, which remains the single source of truth for anything not yet built. Do not assume a module/command/test exists beyond what's listed here — check the filesystem before relying on paths from the docs.
 
-There are no build/lint/test commands yet because no `pyproject.toml`, package, or test suite has been created. Once code exists, commands should be added here (the intended stack implies `pytest`, `mypy`/`flake8`, `npm test`, `tsc --noEmit` — see doc 11 and 16 below — but do not treat these as working commands until verified).
+Build/lint/test:
+- `.venv/bin/pip install -e ".[dev]"` — isolated venv, never touch system Python (shared host).
+- `.venv/bin/pytest -q` — 34 tests covering the analyzer/knowledge/registry/CLI layers.
+- No `mypy`/`flake8`/`npm test`/`tsc` configured yet — don't treat those as working commands until added.
+
+### CLI (Phase 1, stable — see `ai_os/cli.py`)
+```
+ai-os project add <name> <path> [--force]
+ai-os project remove <name>
+ai-os project list
+ai-os scan <name-or-path> [--out graph.json] [--max-hops N] [--languages ...] [--exclude DIR] [--skeleton FQN] [--json]
+```
+`ai-os scan --out graph.json` writes the full Knowledge Graph (node-link JSON, `networkx.json_graph`, pretty-printed) to disk. This is a **first-class, standalone feature** — it does not depend on the (not-yet-built) Orchestrator Core and is meant to be run directly by a human, not just consumed internally later. Keep it working as `KnowledgeEngine.to_json()`/`from_json()` evolve; don't fold it behind orchestrator-only plumbing.
 
 ## What AI-OS is
 
@@ -59,15 +71,15 @@ Each doc in `docs/` is authoritative for its subsystem — read the specific one
 | `17_YOUTUBE_SERIES_AND_OPENSOURCE_PLAN.md` | Content/marketing plan for a companion YouTube devlog series (not architecture) |
 | `18_YOUTUBE_PRODUCTION_AND_EDITING_GUIDE.md` | Video production/editing playbook for the same series (not architecture) |
 
-## Intended directory layout (not yet created)
+## Intended directory layout
 
 Per `docs/14_PROJECT_DIRECTORY_STRUCTURE.md`, the eventual code layout is:
-- `ai_os/core/` — planner, scheduler, lock_manager, staging (Git worktree engine), `db/` (SQLAlchemy models)
-- `ai_os/analyzer/` — `tree_sitter_engine.py`, `call_graph_builder.py`
-- `ai_os/knowledge/` — `graph_engine.py` (NetworkX), `skeleton_extractor.py`, `event_bus.py`
-- `ai_os/mcp/` — `mcp_server.py`, `protocol_router.py`, `adapters/` (per-provider: anthropic, openai, gemini, local)
-- `ai_os/sandbox/` — `container_runner.py`, `log_parser.py`
-- `ui/` — React + Vite + Tailwind + React Flow + Monaco frontend
+- `ai_os/core/` — planner, scheduler, lock_manager, staging (Git worktree engine), `db/` (SQLAlchemy models) — **not yet created**
+- `ai_os/analyzer/` — `tree_sitter_engine.py`, `call_graph_builder.py`, `languages.py`, `queries/*.scm` — **implemented (Phase 1)**
+- `ai_os/knowledge/` — `graph_engine.py` (NetworkX), `skeleton_extractor.py` — **implemented (Phase 1)**; `event_bus.py` — **not yet created** (no file-watcher daemon yet, scans are one-shot CLI invocations)
+- `ai_os/mcp/` — `mcp_server.py`, `protocol_router.py`, `adapters/` (per-provider: anthropic, openai, gemini, local) — **not yet created**
+- `ai_os/sandbox/` — `container_runner.py`, `log_parser.py` — **not yet created**
+- `ui/` — React + Vite + Tailwind + React Flow + Monaco frontend — **not yet created**
 
 When starting implementation, follow this structure unless there's a concrete reason to deviate, since the docs (agents, tests, and any future contributor) assume it.
 
