@@ -26,6 +26,7 @@ from ai_os.core.scheduling_policy import SchedulingPolicy
 from ai_os.core.staging import GitStagingEngine
 from ai_os.core.task_runner import TaskRunner, build_claude_cli_agent_turn_executor
 from ai_os.knowledge.graph_engine import KnowledgeEngine
+from ai_os.knowledge.watcher import ProjectWatcher
 from ai_os.mcp.adapters.base_adapter import LLMTaskRequest
 from ai_os.mcp.config import load_configured_adapters
 from ai_os.mcp.protocol_router import ProtocolRouter, risk_provider_order_from_env
@@ -137,6 +138,78 @@ def scan(
         console.print_json(data=summary)
     else:
         _print_summary_table(summary)
+
+
+@main.command("watch")
+@click.argument("name_or_path")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False), help="Re-write the full graph as JSON on every change.")
+@click.option("--interval", default=1.0, show_default=True, help="Seconds between polls.")
+@click.option("--languages", default=None, help=f"Comma-separated subset of: {', '.join(LANGUAGES)}.")
+@click.option("--exclude", "extra_excluded", multiple=True, help="Extra directory names to skip (repeatable).")
+def watch(
+    name_or_path: str,
+    out_path: str | None,
+    interval: float,
+    languages: str | None,
+    extra_excluded: tuple[str, ...],
+) -> None:
+    """Watch NAME_OR_PATH and keep its Knowledge Graph fresh: on any add/modify/
+    delete of a source file, re-scan the project (the same full scan `ai-os scan`
+    runs) and, with --out, re-write the graph JSON. Runs until Ctrl-C.
+
+    Zero-LLM, zero-network — this is the deterministic analyzer kept live.
+    """
+    try:
+        root = registry.resolve(name_or_path)
+    except registry.ProjectPathError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    language_filter = None
+    if languages:
+        language_filter = {lang.strip() for lang in languages.split(",") if lang.strip()}
+        unknown = language_filter - set(LANGUAGES)
+        if unknown:
+            raise click.ClickException(f"Unknown language(s): {', '.join(sorted(unknown))}")
+
+    watcher = ProjectWatcher(root, languages=language_filter, extra_excluded_dirs=extra_excluded)
+
+    def _write_out(engine) -> None:
+        if out_path is not None:
+            engine.to_json(Path(out_path))
+
+    started = time.monotonic()
+    engine = watcher.start()
+    _write_out(engine)
+    stats = engine.stats()
+    console.print(
+        f"[bold]Watching[/bold] {root} (every {interval}s). Initial scan in "
+        f"{time.monotonic() - started:.2f}s: {stats.get('nodes', '?')} nodes, "
+        f"{stats.get('edges', '?')} edges."
+        + (f" Graph -> {out_path}." if out_path else "")
+    )
+    console.print("[dim]Press Ctrl-C to stop.[/dim]")
+
+    def _on_change(engine, event) -> None:
+        _write_out(engine)
+        s = engine.stats()
+        changed = ", ".join(
+            filter(None, [
+                f"+{len(event.added)}" if event.added else "",
+                f"~{len(event.modified)}" if event.modified else "",
+                f"-{len(event.removed)}" if event.removed else "",
+            ])
+        )
+        stamp = time.strftime("%H:%M:%S")
+        console.print(
+            f"[dim]{stamp}[/dim] re-scanned ({changed} files) -> "
+            f"{s.get('nodes', '?')} nodes, {s.get('edges', '?')} edges"
+            + (f", graph updated" if out_path else "")
+        )
+
+    try:
+        watcher.run(interval=interval, on_change=_on_change)
+    except KeyboardInterrupt:
+        console.print("\nStopped watching.")
 
 
 def _build_summary(name_or_path, root, result, engine, elapsed, out_path) -> dict:

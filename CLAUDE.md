@@ -90,6 +90,7 @@ ai-os project add <name> <path> [--force]
 ai-os project remove <name>
 ai-os project list
 ai-os scan <name-or-path> [--out graph.json] [--max-hops N] [--languages ...] [--exclude DIR] [--skeleton FQN] [--json]
+ai-os watch <name-or-path> [--out graph.json] [--interval SECONDS] [--languages ...] [--exclude DIR]   # live-rebuild the graph on file changes (Scope A watcher)
 ```
 
 `ai-os scan --out graph.json` writes the **full Knowledge Graph** (pretty-printed node-link JSON) to disk — this is a first-class, standalone feature meant for direct human use, not just future internal orchestrator consumption. Keep it working as `KnowledgeEngine` evolves.
@@ -100,7 +101,7 @@ The scan summary reports import resolution as three numbers: total unresolved, o
 
 - **CALLS ambiguity is inherent to name-only resolution.** On a real Java codebase this can hit ~45% ambiguous. A discussed but *not implemented* improvement is scoping name candidates to the caller's file's import graph — but a naive version of that would introduce **false negatives**: Java same-package classes need no import statement at all, so scoping by literal imports would silently drop real edges for same-package calls (very common in service/mapper/repository-per-package layouts) and for methods inherited from a supertype not directly imported by name. A correct version would need same-package siblings + the EXTENDS-transitive closure of imports, not just the raw import list — more work than the simple pitch, not yet built.
 - **Java "external" classification is a default, not a lookup.** Any unresolved Java import is classified external because the internal package index is exhaustive by construction (not because we verified it against a POM/Gradle dependency list) — this is deliberate, not a gap.
-- **No file-watcher / incremental re-parse yet.** Every `scan` is a one-shot full walk (fast enough: ~2s for ~350 files). `ai_os/knowledge/event_bus.py` (doc 04) is not built — that's what would turn this into a live-updating daemon.
+- **A file-watcher exists (`ai-os watch`), but it's a debounced FULL re-scan, not incremental re-parse.** `ai_os/knowledge/watcher.py` (`ProjectWatcher`) is a zero-dependency polling watcher: it snapshots each watched file's `(mtime_ns, size)` and, on any add/modify/delete, reruns the existing `CallGraphBuilder.scan` + `KnowledgeEngine` full rebuild (~2s for ~350 files) — deliberately NOT a genuinely-incremental single-file re-parse (which, because CALLS/EXTENDS resolve against a project-wide name index, would need cross-file edge fixup to stay correct). The doc 04 §3 `asyncio` event bus that pushes fresh context to a *running* Task B is still not built, and is largely redundant with `EpicRunner`'s existing between-generation full rescan. Core is sync + directly testable (`start()`/`poll()` return a `WatchEvent`); `run()` is the `ai-os watch` daemon loop.
 
 ---
 
