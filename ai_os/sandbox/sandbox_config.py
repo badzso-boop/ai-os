@@ -1,0 +1,128 @@
+"""Optional, repo-side sandbox configuration (`.ai-os/sandbox.json`).
+
+This is how a project declares what its test suite needs beyond the language
+profile's defaults — most importantly a **database**. It's committed in the
+project repo (so it lands in every git worktree AI-OS validates), and the
+project owns it: AI-OS never needs to understand the project's schema, it just
+starts the declared services on an isolated network and runs the declared
+setup/seed + test commands the project provides.
+
+Shape (every field optional; absent file → `None` → current single-container,
+`--network none` behavior):
+
+    {
+      "database": {
+        "image": "postgres:16",              // or pgvector/pgvector:pg16, etc.
+        "hostname": "db",                     // DNS name the app connects to
+        "env": { "POSTGRES_USER": "app", "POSTGRES_PASSWORD": "app", "POSTGRES_DB": "app" },
+        "ready_command": "pg_isready -U app -d app"
+      },
+      "env": { "DATABASE_URL": "postgres://app:app@db:5432/app" },  // injected into setup+test
+      "setup_commands": [                     // run (DB reachable, internet NOT) before tests
+        "prisma migrate deploy",
+        "tsx scripts/seed-reference.ts"       // the repo-maintained reference-data seed
+      ],
+      "test_command": "pnpm test:unit"        // optional; overrides the profile's default
+    }
+
+Security note: when a database is declared, the setup + test containers run on a
+Docker `--internal` network (no route to the outside), so the untrusted test
+code can reach the DB but still cannot exfiltrate to the internet.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+CONFIG_RELPATH = Path(".ai-os") / "sandbox.json"
+
+
+class SandboxConfigError(ValueError):
+    """`.ai-os/sandbox.json` exists but is malformed."""
+
+
+@dataclass(frozen=True)
+class DatabaseService:
+    image: str = "postgres:16"
+    hostname: str = "db"
+    env: dict[str, str] = field(default_factory=dict)
+    ready_command: str = "pg_isready"
+    memory: str = "1g"
+
+
+@dataclass(frozen=True)
+class SandboxConfig:
+    database: DatabaseService | None = None
+    env: dict[str, str] = field(default_factory=dict)
+    setup_commands: tuple[str, ...] = ()
+    test_command: str | None = None
+
+    @property
+    def needs_database(self) -> bool:
+        return self.database is not None
+
+
+def _as_str_map(value: object, where: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, (str, int, float, bool)) for k, v in value.items()
+    ):
+        raise SandboxConfigError(f"{where} must be an object of string values")
+    return {k: str(v) for k, v in value.items()}
+
+
+def parse_sandbox_config(data: object) -> SandboxConfig:
+    """Parse an already-loaded JSON object into a `SandboxConfig`, applying
+    defaults and validating types (raising `SandboxConfigError` on anything
+    malformed)."""
+    if not isinstance(data, dict):
+        raise SandboxConfigError("sandbox config root must be a JSON object")
+
+    database = None
+    raw_db = data.get("database")
+    if raw_db is not None:
+        if not isinstance(raw_db, dict):
+            raise SandboxConfigError("'database' must be an object")
+        db_env = _as_str_map(raw_db.get("env"), "database.env")
+        # A sensible default readiness probe honoring the declared user/db.
+        user = db_env.get("POSTGRES_USER", "postgres")
+        db_name = db_env.get("POSTGRES_DB", user)
+        default_ready = f"pg_isready -U {user} -d {db_name}"
+        database = DatabaseService(
+            image=str(raw_db.get("image", "postgres:16")),
+            hostname=str(raw_db.get("hostname", "db")),
+            env=db_env,
+            ready_command=str(raw_db.get("ready_command", default_ready)),
+            memory=str(raw_db.get("memory", "1g")),
+        )
+
+    setup = data.get("setup_commands") or []
+    if not isinstance(setup, list) or not all(isinstance(c, str) for c in setup):
+        raise SandboxConfigError("'setup_commands' must be a list of strings")
+
+    test_command = data.get("test_command")
+    if test_command is not None and not isinstance(test_command, str):
+        raise SandboxConfigError("'test_command' must be a string")
+
+    return SandboxConfig(
+        database=database,
+        env=_as_str_map(data.get("env"), "env"),
+        setup_commands=tuple(setup),
+        test_command=test_command,
+    )
+
+
+def load_sandbox_config(worktree_path: Path) -> SandboxConfig | None:
+    """Load `<worktree>/.ai-os/sandbox.json` if present, else `None`. Raises
+    `SandboxConfigError` if the file exists but is malformed (so a typo surfaces
+    clearly rather than silently disabling the DB)."""
+    path = Path(worktree_path) / CONFIG_RELPATH
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxConfigError(f"{path} is not valid JSON: {exc}") from exc
+    return parse_sandbox_config(data)

@@ -119,7 +119,7 @@ cd ai-os
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # 2. Run the test suite (real Docker containers; never makes a real LLM/network call)
-.venv/bin/pytest -q          # 303 tests (301 passed + 1 skipped opt-in + 1 documented xfail), ~53s
+.venv/bin/pytest -q          # 319 tests (315 passed + 3 skipped opt-in + 1 documented xfail), ~55s
 
 # 3. One-time: build the sandbox image used to validate Python tasks
 #    (bakes pytest in, since the sandbox runs with --network none)
@@ -134,6 +134,8 @@ cp .env.example .env
 > `.env` is gitignored — never commit real credentials. Every value is optional; only providers with real credentials present get configured.
 
 > **Project dependencies in the sandbox.** Validation is a two-phase flow: a project's third-party dependencies are installed in a network-enabled per-task image build, then the tests run against it with `--network none` (so the agent's own code never gets network). This works for **Python** (`requirements.txt`), **Node** (`package.json`), and **Java** (`pom.xml`) — the project just needs to declare its deps in the standard manifest, and the agent is instructed to add any new dependency it introduces.
+
+> **Database-backed tests.** A project whose tests need a real database declares it in a committed `.ai-os/sandbox.json` (a DB service + migration/seed commands + the connection env). Validation then starts a throwaway DB sidecar on a Docker `--internal` network (reachable by the tests, but with **no route to the internet** — so isolation holds), runs the project's reference-data seed, then the tests. See **[docs/SANDBOX_CONFIG.md](docs/SANDBOX_CONFIG.md)** for the format and Python/Node/Java examples.
 
 For convenience, activate the venv so you can drop the `.venv/bin/` prefix:
 

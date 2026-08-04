@@ -46,7 +46,20 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from ai_os.sandbox.db_services import DatabaseSandbox, DatabaseSandboxError
 from ai_os.sandbox.log_parser import build_feedback
+from ai_os.sandbox.sandbox_config import SandboxConfigError, load_sandbox_config
+
+
+def _as_setup_failure(result: ValidationResult) -> ValidationResult:
+    """Re-label a failed setup/seed phase so the agent sees it wasn't the tests
+    that failed, but the migration/seed step before them."""
+    return ValidationResult(
+        success=False,
+        exit_code=result.exit_code,
+        summary="Setup/seed step failed before tests ran.",
+        output="SETUP/SEED FAILED (before tests ran)\n" + result.output,
+    )
 
 
 @dataclass
@@ -155,6 +168,9 @@ def build_docker_argv(
     container_name: str,
     profile: SandboxProfile,
     image: str | None = None,
+    network: str = "none",
+    extra_env: tuple[tuple[str, str], ...] = (),
+    command: str | None = None,
 ) -> list[str]:
     """Build the hardened `docker run ...` argv for one validation run.
 
@@ -164,10 +180,16 @@ def build_docker_argv(
     shared host — the Java profile in particular is covered this way. The order
     and content here must stay in lockstep with doc 10 §1.1's hardening list.
 
-    `image` overrides `profile.image` (used to run against a per-task
-    dependency image built by the two-phase flow); `profile.run_env` is passed
-    through as `-e VAR=VALUE` (needed by the Node profile to point NODE_PATH/PATH
-    at the out-of-tree /deps/node_modules).
+    - `image` overrides `profile.image` (used to run against a per-task
+      dependency image built by the two-phase flow).
+    - `network` is `"none"` by default (full isolation); a DB-backed run passes
+      an `--internal` docker network name so the container can reach the DB
+      sidecar but still has no route to the internet.
+    - `profile.run_env` + `extra_env` are passed through as `-e VAR=VALUE`
+      (run_env for the Node NODE_PATH/PATH; extra_env for `.ai-os/sandbox.json`
+      env + the DB connection).
+    - `command` overrides `profile.command` (used for the setup/seed phase and a
+      project's `test_command` override).
     """
     argv = [
         docker_cli,
@@ -180,7 +202,7 @@ def build_docker_argv(
         "--workdir",
         "/app",
         "--network",
-        "none",
+        network,
         "--memory=2g",
         "--cpus=2.0",
         "--tmpfs",
@@ -189,13 +211,13 @@ def build_docker_argv(
         "--user",
         "1000:1000",
     ]
-    for key, value in profile.run_env:
+    for key, value in tuple(profile.run_env) + tuple(extra_env):
         argv += ["-e", f"{key}={value}"]
     argv += [
         image or profile.image,
         "sh",
         "-c",
-        profile.command,
+        command if command is not None else profile.command,
     ]
     return argv
 
@@ -260,11 +282,93 @@ class EphemeralSandboxRunner:
         if build_failure is not None:
             return build_failure
 
-        container_name = f"ai-os-sandbox-{uuid.uuid4().hex[:12]}"
-        argv = build_docker_argv(
-            self.docker_cli, worktree_path, container_name, profile, image=image
+        # Optional repo-side config (.ai-os/sandbox.json): a declared database
+        # switches this from a single `--network none` container to a DB-backed
+        # flow on an isolated `--internal` network (setup/seed then tests).
+        try:
+            config = load_sandbox_config(Path(worktree_path))
+        except SandboxConfigError as exc:
+            feedback = build_feedback(
+                success=False, exit_code=1, raw_output=f"Invalid .ai-os/sandbox.json: {exc}"
+            )
+            return ValidationResult(False, 1, "Invalid .ai-os/sandbox.json.", feedback["output"])
+
+        if config is not None and config.needs_database:
+            return await self._run_with_database(worktree_path, profile, image, config)
+        return await self._run_isolated(worktree_path, profile, image, config)
+
+    # -- run phases ----------------------------------------------------------
+
+    async def _run_isolated(
+        self, worktree_path: Path, profile: SandboxProfile, image: str, config
+    ) -> ValidationResult:
+        """The default flow: a fully network-isolated (`--network none`)
+        container. Honors an optional (DB-less) `.ai-os/sandbox.json`'s env,
+        setup_commands, and test_command override."""
+        extra_env = tuple(config.env.items()) if config is not None else ()
+        if config is not None and config.setup_commands:
+            setup = await self._run_phase(
+                worktree_path, profile, image, network="none", extra_env=extra_env,
+                command=" && ".join(config.setup_commands),
+                timeout=self.build_timeout_seconds, name_prefix="ai-os-setup",
+            )
+            if not setup.success:
+                return _as_setup_failure(setup)
+        command = config.test_command if config is not None else None
+        return await self._run_phase(
+            worktree_path, profile, image, network="none", extra_env=extra_env,
+            command=command, timeout=self.timeout_seconds,
         )
 
+    async def _run_with_database(
+        self, worktree_path: Path, profile: SandboxProfile, image: str, config
+    ) -> ValidationResult:
+        """DB-backed flow: bring up a Postgres (or other) sidecar on a fresh
+        `--internal` network (no internet), run the setup/seed commands, then the
+        tests — both reaching the DB by its hostname but unable to exfiltrate."""
+        db_sandbox = DatabaseSandbox(self.docker_cli)
+        try:
+            running = await db_sandbox.start(config.database)
+        except DatabaseSandboxError as exc:
+            feedback = build_feedback(
+                success=False, exit_code=1, raw_output=f"Database sidecar failed to start: {exc}"
+            )
+            return ValidationResult(False, 1, "Database sidecar failed to start.", feedback["output"])
+
+        try:
+            extra_env = tuple(config.env.items())
+            if config.setup_commands:
+                setup = await self._run_phase(
+                    worktree_path, profile, image, network=running.network, extra_env=extra_env,
+                    command=" && ".join(config.setup_commands),
+                    timeout=self.build_timeout_seconds, name_prefix="ai-os-setup",
+                )
+                if not setup.success:
+                    return _as_setup_failure(setup)
+            return await self._run_phase(
+                worktree_path, profile, image, network=running.network, extra_env=extra_env,
+                command=config.test_command, timeout=self.timeout_seconds,
+            )
+        finally:
+            await db_sandbox.teardown(running)
+
+    async def _run_phase(
+        self, worktree_path: Path, profile: SandboxProfile, image: str, *,
+        network: str, extra_env: tuple[tuple[str, str], ...], command: str | None,
+        timeout: float, name_prefix: str = "ai-os-sandbox",
+    ) -> ValidationResult:
+        container_name = f"{name_prefix}-{uuid.uuid4().hex[:12]}"
+        argv = build_docker_argv(
+            self.docker_cli, worktree_path, container_name, profile,
+            image=image, network=network, extra_env=extra_env, command=command,
+        )
+        return await self._run_container(argv, container_name, timeout)
+
+    async def _run_container(
+        self, argv: list[str], container_name: str, timeout: float
+    ) -> ValidationResult:
+        """Run one hardened container to completion (or timeout) and turn its
+        exit code + output into a `ValidationResult`."""
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
@@ -272,9 +376,7 @@ class EphemeralSandboxRunner:
         )
 
         try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=self.timeout_seconds
-            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             # The client-side `docker run` process being killed does not
             # necessarily stop the container running in the daemon, so
@@ -282,9 +384,6 @@ class EphemeralSandboxRunner:
             # container may have already exited on its own in a race with
             # the timeout firing, so ignore failures here.
             await self._best_effort_kill(container_name)
-            # Reap our own asyncio subprocess handle so it doesn't linger as
-            # a zombie; the container itself is handled above (--rm reaps
-            # it once killed).
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except asyncio.TimeoutError:
@@ -292,42 +391,26 @@ class EphemeralSandboxRunner:
                 await proc.wait()
 
             feedback = build_feedback(
-                success=False,
-                exit_code=124,
-                raw_output=f"Validation timed out after {self.timeout_seconds}s.",
+                success=False, exit_code=124,
+                raw_output=f"Validation timed out after {timeout}s.",
             )
             return ValidationResult(
-                success=False,
-                exit_code=124,
-                summary=f"Validation timed out after {self.timeout_seconds}s.",
-                output=feedback["output"],
+                success=False, exit_code=124,
+                summary=f"Validation timed out after {timeout}s.", output=feedback["output"],
             )
 
         assert proc.returncode is not None
         raw_output = stdout.decode(errors="replace")
-
-        # `docker run` itself returns 125 for a "failed to even start the
-        # container" class of error (bad flags, image pull failure, daemon
-        # unreachable, etc.) as opposed to the *containerized command's*
-        # exit code being propagated through normally. We don't hard-fail
-        # on 125 (a container can legitimately exit with an unrelated exit
-        # code that happens to be 125), but treat proc.returncode as-is:
-        # docker faithfully propagates the containerized process's exit
-        # code as its own exit code on a normal run, so no special-casing
-        # is needed beyond letting a genuine `docker` invocation error
-        # (e.g. FileNotFoundError if the binary doesn't exist) propagate as
-        # a real exception rather than being swallowed here.
+        # docker faithfully propagates the containerized process's exit code as
+        # its own; a genuine `docker` invocation error (e.g. FileNotFoundError if
+        # the binary doesn't exist) propagates as a real exception instead.
         exit_code = proc.returncode
         success = exit_code == 0
 
-        feedback = build_feedback(
-            success=success, exit_code=exit_code, raw_output=raw_output
-        )
+        feedback = build_feedback(success=success, exit_code=exit_code, raw_output=raw_output)
         return ValidationResult(
-            success=success,
-            exit_code=exit_code,
-            summary=feedback["summary"],
-            output=feedback["output"],
+            success=success, exit_code=exit_code,
+            summary=feedback["summary"], output=feedback["output"],
         )
 
     async def _best_effort_kill(self, container_name: str) -> None:
