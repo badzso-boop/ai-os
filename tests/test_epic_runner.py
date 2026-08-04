@@ -298,6 +298,102 @@ async def test_pr_mode_opens_pr_when_remote_and_gh(git_repo: Path, tmp_path: Pat
     assert result.integration_branch in branches
 
 
+class _UsageLimitAdapter(BaseMCPAdapter):
+    """Raises AgentUsageLimitError for the given task ids (or all if None) — the
+    rest complete normally by writing `<task_id>.py`."""
+
+    def __init__(self, limit_task_ids: set[str] | None = None) -> None:
+        self.limit_task_ids = limit_task_ids
+
+    async def execute_task(self, request: LLMTaskRequest) -> LLMTaskResponse:
+        from ai_os.core.task_runner import AgentUsageLimitError
+
+        if self.limit_task_ids is None or request.task_id in self.limit_task_ids:
+            raise AgentUsageLimitError("simulated 5-hour usage limit")
+        text = f"<<<AI_OS_FILE: {request.task_id}.py>>>\nTASK_ID = {request.task_id!r}\n<<<AI_OS_END>>>"
+        return LLMTaskResponse(
+            task_id=request.task_id, provider="fake", model_name="d", generated_text=text, usage=TokenUsage()
+        )
+
+
+async def test_usage_limit_blocks_task_without_crashing_epic(git_repo: Path):
+    adapter = _UsageLimitAdapter()  # every task hits the limit
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=DynamicScheduler(ProtocolRouter({"gemini": adapter}), environ={}),
+        adapters={"gemini": adapter}, language="python", sandbox_runner=_AlwaysPassSandbox(), create_pr=False,
+    )
+    # Must NOT raise — the epic finishes with the task BLOCKED.
+    result = await runner.run_epic([_task("A")])
+    assert result.blocked == ["A"]
+    assert result.completed == []
+
+
+async def test_usage_limit_keeps_already_completed_work(git_repo: Path):
+    # A completes; B (depends on A) hits the limit -> BLOCKED, but A's work stays.
+    adapter = _UsageLimitAdapter(limit_task_ids={"B"})
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=DynamicScheduler(ProtocolRouter({"gemini": adapter}), environ={}),
+        adapters={"gemini": adapter}, language="python", sandbox_runner=_AlwaysPassSandbox(), create_pr=False,
+    )
+    result = await runner.run_epic([_task("A"), _task("B", deps=["A"])])
+    assert result.completed == ["A"]
+    assert result.blocked == ["B"]
+    assert (git_repo / "A.py").read_text() == "TASK_ID = 'A'"
+
+
+class _LargeFailSandbox:
+    async def run_validation(self, worktree_path: Path, language: str) -> ValidationResult:
+        big = "ERROR: something failed here\n" * 200  # > 2000 chars
+        return ValidationResult(success=False, exit_code=1, summary="fail", output=big)
+
+
+class _PayloadCapturingAdapter(_FilePerTaskAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.payloads: list[str] = []
+
+    async def execute_task(self, request: LLMTaskRequest) -> LLMTaskResponse:
+        self.payloads.append(request.context_payload)
+        return await super().execute_task(request)
+
+
+async def test_summarizer_compresses_large_failure_before_retry(git_repo: Path):
+    calls: list[str] = []
+
+    async def fake_summarizer(output: str) -> str:
+        calls.append(output)
+        return "SUMMARIZED_DIAGNOSIS: fix the thing"
+
+    adapter = _PayloadCapturingAdapter()
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=DynamicScheduler(ProtocolRouter({"gemini": adapter}), environ={}),
+        adapters={"gemini": adapter}, language="python", sandbox_runner=_LargeFailSandbox(),
+        create_pr=False, summarizer=fake_summarizer,
+    )
+    await runner.run_epic([_task("A")])  # fails every attempt -> summarizer runs each time
+
+    assert calls, "summarizer should be called on the large failure output"
+    assert len(calls[0]) > 2000  # it got the raw (large) log
+    # a retry's prompt carries the compressed summary, not the raw log
+    assert any("SUMMARIZED_DIAGNOSIS" in p for p in adapter.payloads)
+
+
+async def test_summarizer_skipped_for_small_output(git_repo: Path):
+    calls: list[str] = []
+
+    async def fake_summarizer(output: str) -> str:
+        calls.append(output)
+        return "x"
+
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=DynamicScheduler(ProtocolRouter({"gemini": _FilePerTaskAdapter()}), environ={}),
+        adapters={"gemini": _FilePerTaskAdapter()}, language="python",
+        sandbox_runner=_AlwaysFailSandbox(), create_pr=False, summarizer=fake_summarizer,
+    )
+    await runner.run_epic([_task("A")])  # _AlwaysFailSandbox output is short ("boom")
+    assert calls == []  # under the 2000-char threshold -> no summarizer call
+
+
 async def test_on_event_emits_observability_events(git_repo: Path):
     events: list[dict] = []
     router = ProtocolRouter({"gemini": _FilePerTaskAdapter()})

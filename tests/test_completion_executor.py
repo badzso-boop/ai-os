@@ -10,6 +10,7 @@ from ai_os.core.task_runner import (
     _EditAction,
     _WriteAction,
     build_completion_agent_turn_executor,
+    build_output_summarizer,
     parse_agent_actions,
     parse_file_patches,
 )
@@ -91,6 +92,21 @@ async def test_executor_rejects_path_traversal(tmp_path):
     with pytest.raises(AgentTurnError):
         await executor(_ctx(tmp_path))
     assert not (tmp_path.parent.parent / "etc/evil.py").exists()
+
+
+async def test_build_output_summarizer_calls_cheap_model():
+    adapter = _CannedAdapter("tsc: 2 errors in Hero.tsx — fix asChild -> render")
+    summarize = build_output_summarizer(adapter, model="haiku")
+    result = await summarize("... huge raw log ...")
+    assert result == "tsc: 2 errors in Hero.tsx — fix asChild -> render"
+    assert adapter.requests[0].model == "haiku"
+    assert adapter.requests[0].context_payload == "... huge raw log ..."
+
+
+async def test_summarizer_falls_back_to_raw_on_empty_summary():
+    adapter = _CannedAdapter("")  # model returned nothing
+    summarize = build_output_summarizer(adapter)
+    assert await summarize("raw log stays") == "raw log stays"
 
 
 async def test_executor_injects_project_conventions(tmp_path):

@@ -119,7 +119,7 @@ cd ai-os
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # 2. Run the test suite (real Docker containers; never makes a real LLM/network call)
-.venv/bin/pytest -q          # 345 tests (339 passed + 6 skipped opt-in + 1 documented xfail), ~52s
+.venv/bin/pytest -q          # 352 tests (345 passed + 6 skipped opt-in + 1 documented xfail), ~53s
 
 # 3. One-time: build the sandbox image used to validate Python tasks
 #    (bakes pytest in, since the sandbox runs with --network none)

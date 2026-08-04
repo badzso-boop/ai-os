@@ -26,7 +26,11 @@ from ai_os.core.persistence import Persistence, default_db_url
 from ai_os.core.scheduler import DynamicScheduler
 from ai_os.core.scheduling_policy import SchedulingPolicy
 from ai_os.core.staging import GitStagingEngine
-from ai_os.core.task_runner import TaskRunner, build_claude_cli_agent_turn_executor
+from ai_os.core.task_runner import (
+    TaskRunner,
+    build_claude_cli_agent_turn_executor,
+    build_output_summarizer,
+)
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.knowledge.watcher import ProjectWatcher
 from ai_os.mcp.adapters.base_adapter import LLMTaskRequest
@@ -562,6 +566,15 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
         console.print("Aborted — no tasks were run.")
         return
 
+    # Cheap-model summarizer for large validation failure logs: route it to the
+    # LOW-risk (cheapest configured) provider+model, so the expensive task model
+    # gets a tight diagnosis on retry instead of the whole log.
+    try:
+        low = scheduler.assign("LOW")
+        summarizer = build_output_summarizer(adapters[low.provider], low.model)
+    except Exception:
+        summarizer = None  # no LOW provider configured -> skip summarization
+
     async def _execute():
         # Accounting (Stage 3): persist epic + per-task rows + token/lock audit
         # so `ai-os cost` / `ai-os epic history` can read back real spend.
@@ -569,6 +582,7 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
         runner = EpicRunner(
             repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
             sandbox_runner=EphemeralSandboxRunner(),
+            summarizer=summarizer,
             # Terminal states only — the attempt/validation events (on_event)
             # cover the in-flight detail, so RUNNING would just be noise.
             on_status_change=lambda tid, status: (

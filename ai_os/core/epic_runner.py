@@ -91,6 +91,7 @@ class EpicRunner:
         create_pr: bool = True,
         pr_base_branch: str = "main",
         on_event: Optional[Callable[[dict], None]] = None,
+        summarizer: Optional[Callable] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.scheduler = scheduler
@@ -112,6 +113,8 @@ class EpicRunner:
         # Repo-side `.ai-os/conventions.md`, injected into every task's prompt so
         # all providers follow the project's rules (i18n, UI library, …).
         self.project_conventions = load_project_conventions(self.repo_root)
+        # Optional cheap-model summarizer for large validation failure logs.
+        self.summarizer = summarizer
         # Optional accounting (Stage 3). When set, the epic + a row per task are
         # created up front (the audit tables FK to them), and each TaskRunner
         # records token cost + lock audit + status against those rows.
@@ -214,6 +217,7 @@ class EpicRunner:
             epic_id=epic_id,
             on_event=self.on_event,
             project_conventions=self.project_conventions,
+            summarize_output=self.summarizer,
         )
         return await runner.run_task(task, language=self.language)
 

@@ -97,6 +97,18 @@ retry path and is never an exception here.
 """
 
 
+class AgentUsageLimitError(RuntimeError):
+    """The agent hit a usage/rate limit (e.g. the Claude subscription's 5-hour
+    cap) — as opposed to a transient crash. `TaskRunner` blocks the task
+    immediately on this (no retry: the limit won't reset in-run) so the epic can
+    still finalize the tasks that already completed, instead of the whole run
+    dying with an unhandled exception."""
+
+
+# Substrings that mark a usage/rate-limit failure in the `claude` CLI's output.
+_USAGE_LIMIT_MARKERS = ("usage limit", "rate limit", "resets", "quota", "429", "too many requests")
+
+
 class TaskRunner:
     """Runs one `TaskNode` to completion or exhaustion. One instance can be
     reused across tasks (it holds no per-task state itself).
@@ -114,7 +126,14 @@ class TaskRunner:
         epic_id: Optional[str] = None,
         on_event: Optional[Callable[[dict], None]] = None,
         project_conventions: str = "",
+        summarize_output: Optional[Callable[[str], Awaitable[str]]] = None,
+        summarize_threshold: int = 2000,
     ) -> None:
+        # Optional cheap-model summarizer for large validation failure logs — see
+        # `build_output_summarizer`. Only invoked when the output exceeds
+        # `summarize_threshold` chars, so short errors skip the extra call.
+        self.summarize_output = summarize_output
+        self.summarize_threshold = summarize_threshold
         self.project_conventions = project_conventions
         self.lock_manager = lock_manager
         self.staging = staging
@@ -209,7 +228,23 @@ class TaskRunner:
                     previous_validation_output=last_output,
                     project_conventions=self.project_conventions,
                 )
-                turn_usage = await self.agent_turn_executor(turn_ctx)
+                try:
+                    turn_usage = await self.agent_turn_executor(turn_ctx)
+                except AgentUsageLimitError as exc:
+                    # A usage/rate limit (e.g. the Claude subscription's 5h cap):
+                    # retrying won't help in-run. Emit + go straight to BLOCKED so
+                    # the epic still finalizes the tasks that DID complete.
+                    self._emit(type="agent_error", task_id=task.id, attempt=attempt, error=str(exc), fatal=True)
+                    last_output = f"Agent unavailable (usage/rate limit): {exc}"
+                    break
+                except Exception as exc:
+                    # Any other agent-turn infra crash: don't kill the whole epic
+                    # — treat it as a failed attempt (retry), then BLOCK on exhaustion.
+                    self._emit(type="agent_error", task_id=task.id, attempt=attempt, error=str(exc), fatal=False)
+                    last_output = f"Agent turn failed: {exc}"
+                    if attempt < max_attempts:
+                        self._emit(type="retry", task_id=task.id, next_attempt=attempt + 1)
+                    continue
                 if turn_usage is not None:
                     self._emit(
                         type="agent_turn", task_id=task.id, attempt=attempt,
@@ -260,6 +295,23 @@ class TaskRunner:
                     self._emit(
                         type="merge_conflict", task_id=task.id, attempt=attempt, output=last_output
                     )
+                # Cheap-model summary of a LARGE failure log before the next
+                # attempt's (expensive) model sees it — saves tokens/context. Only
+                # kicks in past the threshold, so short errors are fed back as-is.
+                if (
+                    not merged and validator_ran and self.summarize_output is not None
+                    and last_output and len(last_output) > self.summarize_threshold
+                ):
+                    try:
+                        summary = await self.summarize_output(last_output)
+                        if summary and summary.strip():
+                            self._emit(
+                                type="summarized", task_id=task.id, attempt=attempt,
+                                original_len=len(last_output), summary_len=len(summary),
+                            )
+                            last_output = summary
+                    except Exception:
+                        pass  # keep the raw output if the summarizer fails
                 if attempt < max_attempts:
                     self._emit(type="retry", task_id=task.id, next_attempt=attempt + 1)
 
@@ -268,6 +320,38 @@ class TaskRunner:
             return TaskRunResult(
                 task_id=task.id, status="BLOCKED", attempts=attempt, final_output=last_output
             )
+
+
+SUMMARIZER_SYSTEM_PROMPT = (
+    "You are a build/test log summarizer. Given raw compiler/test/linter output, "
+    "produce a concise summary (at most ~15 lines) of what FAILED and the exact "
+    "errors to fix. KEEP verbatim: file paths, line/column numbers, error codes, "
+    "and the key error messages. DROP: progress bars, timing, stack-trace noise, "
+    "passing lines. Output only the summary, no preamble."
+)
+
+
+def build_output_summarizer(
+    adapter: BaseMCPAdapter, model: str | None = None
+) -> Callable[[str], Awaitable[str]]:
+    """Build a cheap-model summarizer for large validation failure logs: it
+    compresses the raw output down to the actionable errors, so the (expensive)
+    task model gets a tight diagnosis on retry instead of the whole log. Wired to
+    a LOW-risk (cheap) provider+model by the CLI. Returns the raw output
+    unchanged if the summary comes back empty."""
+
+    async def summarize(output: str) -> str:
+        request = LLMTaskRequest(
+            task_id="summarize-validation",
+            system_prompt=SUMMARIZER_SYSTEM_PROMPT,
+            context_payload=output,
+            model=model,
+        )
+        response = await adapter.execute_task(request)
+        text = (response.generated_text or "").strip()
+        return text or output
+
+    return summarize
 
 
 def build_claude_cli_agent_turn_executor(
@@ -361,8 +445,15 @@ def build_claude_cli_agent_turn_executor(
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
+                combined = (stdout.decode(errors="replace") + "\n" + stderr.decode(errors="replace"))
+                lowered = combined.lower()
+                if any(marker in lowered for marker in _USAGE_LIMIT_MARKERS):
+                    raise AgentUsageLimitError(
+                        f"claude CLI reported a usage/rate limit: {combined.strip()[:500]}"
+                    )
                 raise RuntimeError(
-                    f"claude CLI agent turn failed (exit {proc.returncode}): {stderr.decode()[:2000]}"
+                    f"claude CLI agent turn failed (exit {proc.returncode}): "
+                    f"{(stderr.decode(errors='replace') or stdout.decode(errors='replace'))[:2000]}"
                 )
         finally:
             Path(mcp_config_path).unlink(missing_ok=True)
