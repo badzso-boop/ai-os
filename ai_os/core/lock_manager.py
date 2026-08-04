@@ -31,7 +31,12 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Set
+from typing import AsyncIterator, Awaitable, Callable, Dict, Optional, Set
+
+# (filepath, lock_type, action) -> None, awaited on each acquire/release when a
+# caller passes one to `locks()`. Used by `TaskRunner` to write LockAuditModel
+# rows (Stage 3); `None` means no auditing (the default).
+LockAuditCallback = Callable[[str, str, str], Awaitable[None]]
 
 
 class LockManager:
@@ -99,16 +104,37 @@ class LockManager:
 
     @asynccontextmanager
     async def locks(
-        self, task_id: str, read_set: Set[str], write_set: Set[str]
+        self,
+        task_id: str,
+        read_set: Set[str],
+        write_set: Set[str],
+        audit: Optional[LockAuditCallback] = None,
     ) -> AsyncIterator[None]:
         """Primary public API: acquire on enter, guaranteed release on exit.
 
         Prefer this over the raw `acquire_locks`/`release_locks` pair
         everywhere except in tests that need to inspect intermediate lock
         state, since it releases even when the guarded block raises.
+
+        If `audit` is given, it is awaited once per file on acquire and once
+        per file on release (with `lock_type` "READ"/"WRITE" and `action`
+        "ACQUIRE"/"RELEASE"). Auditing runs *outside* the internal condition
+        lock — `acquire_locks` is all-or-nothing, so the full read/write sets
+        are exactly what was granted — so a slow audit sink (e.g. a DB write)
+        never holds up other tasks' lock operations.
         """
         await self.acquire_locks(task_id, read_set, write_set)
+        if audit is not None:
+            for f in sorted(read_set):
+                await audit(f, "READ", "ACQUIRE")
+            for f in sorted(write_set):
+                await audit(f, "WRITE", "ACQUIRE")
         try:
             yield
         finally:
             await self.release_locks(task_id, read_set, write_set)
+            if audit is not None:
+                for f in sorted(read_set):
+                    await audit(f, "READ", "RELEASE")
+                for f in sorted(write_set):
+                    await audit(f, "WRITE", "RELEASE")

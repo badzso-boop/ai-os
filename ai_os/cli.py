@@ -20,6 +20,7 @@ from ai_os.core.epic_planner import EpicPlanError, decompose
 from ai_os.core.epic_runner import EpicRunner
 from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
+from ai_os.core.persistence import Persistence, default_db_url
 from ai_os.core.scheduler import DynamicScheduler
 from ai_os.core.staging import GitStagingEngine
 from ai_os.core.task_runner import TaskRunner, build_claude_cli_agent_turn_executor
@@ -409,12 +410,14 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
     except EpicPlanError as exc:
         raise click.ClickException(f"Planning failed: {exc}") from exc
 
-    runner = EpicRunner(
+    # Plan table + HITL Stage 1 gate use a persistence-free runner (pure
+    # scheduler routing) so the DB (and its event loop) is only touched inside
+    # the single async run below — opening the aiosqlite engine in one loop and
+    # using it in another would bind it to the wrong loop.
+    prelim = EpicRunner(
         repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
-        sandbox_runner=EphemeralSandboxRunner(),
-        on_status_change=lambda tid, status: console.print(f"[dim]{tid}: {status}[/dim]"),
     )
-    assignments = runner.plan_assignments(tasks)
+    assignments = prelim.plan_assignments(tasks)
     _print_plan_table(tasks, assignments)
 
     # HITL Stage 1: Plan Review gate (doc 12 §2.1). The React UI version is
@@ -423,12 +426,101 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
         console.print("Aborted — no tasks were run.")
         return
 
-    result = asyncio.run(runner.run_epic(tasks))
+    async def _execute():
+        # Accounting (Stage 3): persist epic + per-task rows + token/lock audit
+        # so `ai-os cost` / `ai-os epic history` can read back real spend.
+        persistence, engine = await Persistence.open(default_db_url())
+        runner = EpicRunner(
+            repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
+            sandbox_runner=EphemeralSandboxRunner(),
+            on_status_change=lambda tid, status: console.print(f"[dim]{tid}: {status}[/dim]"),
+            persistence=persistence,
+        )
+        try:
+            return await runner.run_epic(tasks, epic_title=prompt[:120], raw_prompt=prompt)
+        finally:
+            await engine.dispose()
+
+    result = asyncio.run(_execute())
 
     console.print("\n[bold]Epic finished.[/bold]")
     console.print(f"  [green]Completed[/green]: {', '.join(result.completed) or '-'}")
     console.print(f"  [red]Blocked[/red]:   {', '.join(result.blocked) or '-'}")
     console.print(f"  [yellow]Skipped[/yellow]:   {', '.join(result.skipped) or '-'}")
+    if result.epic_id:
+        console.print(f"\n[dim]Accounting saved. See:[/dim] ai-os cost --epic {result.epic_id}")
+
+
+@epic.command("history")
+def epic_history() -> None:
+    """List past epics with their status, task counts, and total spend
+    (reads the accounting DB written by `ai-os epic run`)."""
+
+    async def _load():
+        persistence, engine = await Persistence.open(default_db_url())
+        try:
+            return await persistence.epic_summaries()
+        finally:
+            await engine.dispose()
+
+    summaries = asyncio.run(_load())
+    if not summaries:
+        console.print("No epics recorded yet. Run `ai-os epic run ...` first.")
+        return
+
+    table = Table(title="Epic history")
+    table.add_column("Epic ID")
+    table.add_column("Title")
+    table.add_column("Status")
+    table.add_column("Tasks (done/total)")
+    table.add_column("Tokens (in/out)")
+    table.add_column("USD", justify="right")
+    for s in summaries:
+        table.add_row(
+            s.id[:12], (s.title or "")[:40], s.status,
+            f"{s.completed_tasks}/{s.total_tasks}",
+            f"{s.input_tokens}/{s.output_tokens}", f"${s.total_usd:.4f}",
+        )
+    console.print(table)
+
+
+@main.command("cost")
+@click.option("--epic", "epic_id", default=None, help="Scope the breakdown to one epic id (default: all epics).")
+def cost(epic_id: str | None) -> None:
+    """Show token/USD spend grouped by provider+model (all epics, or one via
+    --epic), from the accounting DB."""
+
+    async def _load():
+        persistence, engine = await Persistence.open(default_db_url())
+        try:
+            rows = await persistence.provider_breakdown(epic_id=epic_id)
+            total = await persistence.epic_total_usd(epic_id) if epic_id else None
+            return rows, total
+        finally:
+            await engine.dispose()
+
+    rows, epic_total = asyncio.run(_load())
+    if not rows:
+        scope = f"epic {epic_id}" if epic_id else "any epic"
+        console.print(f"No spend recorded for {scope} yet.")
+        return
+
+    title = f"Spend by provider — epic {epic_id[:12]}" if epic_id else "Spend by provider (all epics)"
+    table = Table(title=title)
+    table.add_column("Provider")
+    table.add_column("Model")
+    table.add_column("Calls", justify="right")
+    table.add_column("Tokens (in/out)")
+    table.add_column("USD", justify="right")
+    grand = 0.0
+    for r in rows:
+        grand += r.total_usd
+        table.add_row(
+            r.provider, r.model_name, str(r.calls),
+            f"{r.input_tokens}/{r.output_tokens}", f"${r.total_usd:.4f}",
+        )
+    console.print(table)
+    console.print(f"[bold]Total:[/bold] ${grand:.4f}")
 
 
 if __name__ == "__main__":

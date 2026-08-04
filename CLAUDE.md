@@ -20,7 +20,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q          # 204 tests (203 passed + 1 documented xfail), ~30s (real Docker containers) — never makes a real LLM/network-to-a-provider call
+.venv/bin/pytest -q          # 261 tests (260 passed + 1 documented xfail), ~32s (real Docker containers) — never makes a real LLM/network-to-a-provider call
+.venv/bin/ai-os epic history                          # past epics: status, task counts, token/USD spend (Phase 5 Stage 3)
+.venv/bin/ai-os cost [--epic <id>]                    # spend grouped by provider+model, from the accounting DB
 cp .env.example .env         # fill in whichever provider credentials you have
 .venv/bin/ai-os llm list     # shows which providers are actually configured
 .venv/bin/ai-os llm test anthropic --prompt "say hi"   # REAL call, consumes real usage/quota
@@ -207,7 +209,7 @@ Closes the gap between "run one hand-specified task" (Phase 3b's `ai-os task run
 
 ## Phase 5 — how it actually works (in progress)
 
-Closes four of the deliberately-deferred gaps, in four independently-committed stages. **Stages 1 (multi-provider autonomous tool-calling) and 2 (edit-based patching) are done**; Stages 3–4 (LockAudit/TokenCost persistence, adaptive rate-limit/cost-aware scheduling) are planned but not yet built. Same testing philosophy as every prior phase: no real LLM/network/Docker in the automated suite (fake tool-calling adapters scripting a tool-call-then-final-answer sequence, `httpx.MockTransport` for the adapter wire-format tests, real disposable git repos + fake sandbox); the real "a live model autonomously calls tools over its own API" run stays a manual `ai-os epic run` step.
+Closes four of the deliberately-deferred gaps, in four independently-committed stages. **Stages 1 (multi-provider autonomous tool-calling), 2 (edit-based patching), and 3 (LockAudit/TokenCost persistence) are done**; Stage 4 (adaptive rate-limit/cost-aware scheduling) is planned but not yet built. Same testing philosophy as every prior phase: no real LLM/network/Docker in the automated suite (fake tool-calling adapters scripting a tool-call-then-final-answer sequence, `httpx.MockTransport` for the adapter wire-format tests, real disposable git repos + fake sandbox); the real "a live model autonomously calls tools over its own API" run stays a manual `ai-os epic run` step.
 
 ### Stage 1 — Multi-provider autonomous tool-calling (implemented)
 
@@ -235,10 +237,19 @@ Search/replace edit blocks (Aider-style), NOT unified diffs — robust for LLMs 
 
 Tests: `apply_file_edit` unit + dispatch-routing + real-round-trip tool-list in `test_mcp_server.py`; edit-block parsing (`parse_agent_actions` order), apply-to-existing-file, missing/ambiguous-search-raises, write-then-edit-same-file in `test_completion_executor.py`.
 
-### Stages 3–4 — planned, not yet built
+### Stage 3 — LockAudit + TokenCost persistence (implemented)
 
-- **Stage 3 — LockAudit/TokenCost persistence**: new `ai_os/core/persistence.py` (thin async repo over `core/db/`), Epic/Task lifecycle rows, `AgentTurnExecutor` widened to return usage, best-effort/optional via an injected `session_factory`, `ai-os cost` / `ai-os epic history` CLI.
-- **Stage 4 — Adaptive rate-limit + cost-aware scheduling** (doc 02 §2.2): adapters surface a typed `RateLimitedError` on HTTP 429 (with `Retry-After`); a new `ai_os/core/scheduling_policy.py` adds exponential backoff + provider fallback (why risk→provider order is a list) + an optional `AI_OS_EPIC_BUDGET_USD` cap (reads Stage 3's TokenCost rows). Adaptive, NOT hardcoded TPM/RPM numbers.
+The `LockAuditModel`/`TokenCostModel` tables (schema since Phase 2) finally get populated, on the correct FK chain (`token_costs`/`lock_audits` → `tasks` → `epics`, with `PRAGMA foreign_keys=ON`).
+- **`ai_os/core/persistence.py`** — `Persistence`, a thin async repository over `core/db/`. Writes: `create_epic`/`set_epic_status`/`upsert_task`/`update_task_status`/`record_lock_audit`/`record_token_cost`. Reads (plain dataclasses, never ORM across the session boundary): `epic_summaries` (per-epic task counts + rolled-up spend), `provider_breakdown` (spend grouped by provider+model, optionally epic-scoped), `epic_total_usd` (the Stage-4 cost-cap input). `Persistence.open(db_url) -> (Persistence, engine)` creates the schema; `default_db_url()` points at `<AI_OS_HOME or ~/.ai-os>/ai-os.db`.
+- **Usage threading**: `AgentTurnExecutor` now returns `Optional[AgentTurnUsage]` (provider, model, `TokenUsage`) instead of `None`. All three executors report it (completion/tool-calling from their `LLMTaskResponse`; the Claude-CLI one parses the `--output-format json` usage). `None` means "nothing to record" (test fakes) — accounting is skipped, never an error.
+- **Wiring, best-effort/optional**: `TaskRunner` gains `persistence`/`epic_id` params — when set it records a `TokenCostModel` row per turn, a `LockAuditModel` row per lock acquire/release (via a new optional `audit` callback on `LockManager.locks()`, run OUTSIDE the condition lock), and mirrors status into the `TaskModel` row. `EpicRunner` gains `persistence` — it creates the epic + a row per task up front (FK order), then threads it into each `TaskRunner`. Every persistence write goes through `_safe_persist` (logs + swallows on error), so a DB hiccup never aborts a real generation run; with no `persistence` injected the runners behave exactly as before (all pre-Stage-3 tests unchanged).
+- **CLI readback**: `ai-os epic history` (epics with status, task counts, tokens, USD) and `ai-os cost [--epic <id>]` (spend by provider+model + grand total). `ai-os epic run` now opens the DB and passes `persistence` in (epic title = the prompt), printing the epic id + a `ai-os cost --epic <id>` hint at the end. The DB engine is opened and used inside a single `asyncio.run` (opening an aiosqlite engine in one event loop and using it in another binds it to the wrong loop).
+
+Tests: `test_persistence.py` (real tmp SQLite — full FK chain, FK-rejects-orphan-cost, upsert status/model, provider grouping, epic-scoped totals), `test_epic_runner.py::test_epic_run_persists_accounting_rows` (a real epic run leaves epic/task/token_cost rows), `test_cli_epic.py` (cost/history read back seeded spend; epic-run DB isolated to a tmp `AI_OS_HOME`).
+
+### Stage 4 — planned, not yet built
+
+- **Adaptive rate-limit + cost-aware scheduling** (doc 02 §2.2): adapters surface a typed `RateLimitedError` on HTTP 429 (with `Retry-After`); a new `ai_os/core/scheduling_policy.py` adds exponential backoff + provider fallback (why risk→provider order is a list) + an optional `AI_OS_EPIC_BUDGET_USD` cap (reads Stage 3's `epic_total_usd`). Adaptive, NOT hardcoded TPM/RPM numbers.
 
 ---
 

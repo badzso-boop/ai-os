@@ -157,3 +157,32 @@ async def test_independent_tasks_all_run(git_repo: Path):
     tasks = [_task("X"), _task("Y"), _task("Z")]  # no deps, all one generation
     result = await _runner(git_repo, _FilePerTaskAdapter(), _AlwaysPassSandbox()).run_epic(tasks)
     assert set(result.completed) == {"X", "Y", "Z"}
+
+
+async def test_epic_run_persists_accounting_rows(git_repo: Path, tmp_path: Path):
+    # With persistence injected, a real epic run must leave epic/task/token_cost/
+    # lock_audit rows behind (Stage 3), against a real SQLite file.
+    from ai_os.core.persistence import Persistence
+
+    persistence, _engine = await Persistence.open(f"sqlite+aiosqlite:///{tmp_path / 'acct.db'}")
+    adapter = _FilePerTaskAdapter()
+    router = ProtocolRouter({"gemini": adapter})
+    scheduler = DynamicScheduler(router, environ={})
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=scheduler, adapters={"gemini": adapter},
+        language="python", sandbox_runner=_AlwaysPassSandbox(), persistence=persistence,
+    )
+    tasks = [_task("A"), _task("B", deps=["A"])]
+    result = await runner.run_epic(tasks, epic_title="demo", raw_prompt="do A then B")
+
+    assert set(result.completed) == {"A", "B"}
+    assert result.epic_id is not None
+
+    summaries = await persistence.epic_summaries()
+    assert len(summaries) == 1
+    s = summaries[0]
+    assert s.id == result.epic_id and s.title == "demo" and s.status == "COMPLETED"
+    assert s.total_tasks == 2 and s.completed_tasks == 2
+    # The completion adapter reported usage per turn -> token_cost rows exist.
+    breakdown = await persistence.provider_breakdown(epic_id=result.epic_id)
+    assert breakdown and breakdown[0].calls >= 2

@@ -31,7 +31,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
@@ -40,9 +40,13 @@ from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import (
     BaseMCPAdapter,
     LLMTaskRequest,
+    TokenUsage,
     ToolSpec,
 )
 from ai_os.sandbox.container_runner import EphemeralSandboxRunner
+
+if TYPE_CHECKING:
+    from ai_os.core.persistence import Persistence
 
 
 @dataclass
@@ -68,11 +72,24 @@ class TaskRunResult:
     final_output: str | None = None
 
 
-AgentTurnExecutor = Callable[[AgentTurnContext], Awaitable[None]]
-"""Perform one agent turn against `ctx.worktree_path` and return. Raising
-signals an infra fault in the turn itself (e.g. the CLI subprocess crashed) —
-distinct from "the turn completed but the code still fails validation",
-which is the normal, expected retry path and is never an exception here.
+@dataclass
+class AgentTurnUsage:
+    """What one agent turn cost, for accounting (Stage 3). Returned by an
+    `AgentTurnExecutor` so `TaskRunner` can persist a `TokenCostModel` row per
+    turn. `None` from an executor means "no usage to record" (e.g. a test fake,
+    or a path that can't report usage) — accounting is skipped, not an error."""
+
+    provider: str
+    model_name: str
+    usage: TokenUsage
+
+
+AgentTurnExecutor = Callable[[AgentTurnContext], Awaitable[Optional["AgentTurnUsage"]]]
+"""Perform one agent turn against `ctx.worktree_path` and return the turn's
+usage (or `None` if it has none to report). Raising signals an infra fault in
+the turn itself (e.g. the CLI subprocess crashed) — distinct from "the turn
+completed but the code still fails validation", which is the normal, expected
+retry path and is never an exception here.
 """
 
 
@@ -89,6 +106,8 @@ class TaskRunner:
         agent_turn_executor: AgentTurnExecutor,
         sandbox_runner: Optional[EphemeralSandboxRunner] = None,
         on_status_change: Optional[Callable[[str, str], None]] = None,
+        persistence: Optional["Persistence"] = None,
+        epic_id: Optional[str] = None,
     ) -> None:
         self.lock_manager = lock_manager
         self.staging = staging
@@ -101,14 +120,51 @@ class TaskRunner:
         # already exists (Phase 2's schema requires a non-null epic_id FK) —
         # callers who want DB persistence wire this to their own upsert.
         self.on_status_change = on_status_change
+        # Optional accounting (Stage 3). When `persistence` is injected (only
+        # `EpicRunner` does, AFTER creating the epic+task rows the audit tables
+        # FK to), TaskRunner records a TokenCostModel row per agent turn, a
+        # LockAuditModel row per lock acquire/release, and mirrors status
+        # changes into the TaskModel row. All best-effort: a DB error here logs
+        # and is swallowed, never aborting a real generation run.
+        self.persistence = persistence
+        self.epic_id = epic_id
 
-    def _report_status(self, task_id: str, status: str) -> None:
+    async def _report_status(self, task_id: str, status: str) -> None:
         if self.on_status_change is not None:
             self.on_status_change(task_id, status)
+        if self.persistence is not None:
+            await self._safe_persist(self.persistence.update_task_status(task_id, status))
+
+    @staticmethod
+    async def _safe_persist(coro: Awaitable[None]) -> None:
+        """Await a persistence write, swallowing (but reporting) any error so
+        accounting never breaks a real run."""
+        try:
+            await coro
+        except Exception as exc:  # pragma: no cover - defensive best-effort
+            import sys
+
+            print(f"[ai-os] persistence write failed (ignored): {exc}", file=sys.stderr)
+
+    def _lock_audit_callback(self, task_id: str):
+        """An async (filepath, lock_type, action) -> None callback for
+        `LockManager.locks`, or `None` when no persistence is configured (so the
+        lock manager skips auditing entirely)."""
+        if self.persistence is None:
+            return None
+
+        async def audit(filepath: str, lock_type: str, action: str) -> None:
+            await self._safe_persist(
+                self.persistence.record_lock_audit(task_id, filepath, lock_type, action)
+            )
+
+        return audit
 
     async def run_task(self, task: TaskNode, language: str, max_hops: int = 2) -> TaskRunResult:
-        async with self.lock_manager.locks(task.id, task.read_set, task.write_set):
-            self._report_status(task.id, "RUNNING")
+        async with self.lock_manager.locks(
+            task.id, task.read_set, task.write_set, audit=self._lock_audit_callback(task.id)
+        ):
+            await self._report_status(task.id, "RUNNING")
             worktree_path = await self.staging.create_worktree(task.id)
             context_cache = self.knowledge_engine.build_context_cache(
                 task.target_files, max_hops=max_hops
@@ -125,7 +181,13 @@ class TaskRunner:
                     attempt=attempt,
                     previous_validation_output=last_output,
                 )
-                await self.agent_turn_executor(turn_ctx)
+                turn_usage = await self.agent_turn_executor(turn_ctx)
+                if self.persistence is not None and turn_usage is not None:
+                    await self._safe_persist(
+                        self.persistence.record_token_cost(
+                            task.id, turn_usage.provider, turn_usage.model_name, turn_usage.usage
+                        )
+                    )
 
                 validator_ran = False
 
@@ -140,7 +202,7 @@ class TaskRunner:
                     task.id, f"{task.id}: attempt {attempt}", validator
                 )
                 if merged:
-                    self._report_status(task.id, "COMPLETED")
+                    await self._report_status(task.id, "COMPLETED")
                     return TaskRunResult(
                         task_id=task.id, status="COMPLETED", attempts=attempt, final_output=last_output
                     )
@@ -155,7 +217,7 @@ class TaskRunner:
                     )
 
             await self.staging.abandon_task(task.id)
-            self._report_status(task.id, "BLOCKED")
+            await self._report_status(task.id, "BLOCKED")
             return TaskRunResult(
                 task_id=task.id, status="BLOCKED", attempts=attempt, final_output=last_output
             )
@@ -257,6 +319,24 @@ def build_claude_cli_agent_turn_executor(
                 )
         finally:
             Path(mcp_config_path).unlink(missing_ok=True)
+
+        # Parse the CLI's JSON usage for accounting (Stage 3). Best-effort: an
+        # unparseable/partial payload just means no cost row for this turn, not
+        # a failed turn (the code changes already landed in the worktree).
+        try:
+            payload = json.loads(stdout.decode())
+            usage = payload.get("usage") or {}
+            return AgentTurnUsage(
+                provider="anthropic",
+                model_name=model,
+                usage=TokenUsage(
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    estimated_usd_cost=payload.get("total_cost_usd", 0.0),
+                ),
+            )
+        except (json.JSONDecodeError, AttributeError):
+            return None
 
     return execute
 
@@ -473,6 +553,9 @@ def build_completion_agent_turn_executor(
                 _write_patch_within_worktree(ctx.worktree_path, action.path, action.content)
             else:
                 _apply_edit_within_worktree(ctx.worktree_path, action)
+        return AgentTurnUsage(
+            provider=response.provider, model_name=response.model_name, usage=response.usage
+        )
 
     return execute
 
@@ -592,6 +675,9 @@ def build_tool_calling_agent_turn_executor(
             context_payload="\n".join(prompt_parts),
             model=model,
         )
-        await adapter.execute_with_tools(request, tool_specs, dispatch)
+        response = await adapter.execute_with_tools(request, tool_specs, dispatch)
+        return AgentTurnUsage(
+            provider=response.provider, model_name=response.model_name, usage=response.usage
+        )
 
     return execute

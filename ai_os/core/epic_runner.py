@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from ai_os.analyzer.call_graph_builder import CallGraphBuilder
 from ai_os.core import planner
@@ -46,6 +47,9 @@ from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import BaseMCPAdapter
 from ai_os.sandbox.container_runner import EphemeralSandboxRunner
 
+if TYPE_CHECKING:
+    from ai_os.core.persistence import Persistence
+
 
 @dataclass
 class EpicRunResult:
@@ -56,6 +60,9 @@ class EpicRunResult:
     # (task_id, provider, model|None) for each task actually started — lets the
     # CLI show/what confirm which model each task was routed to.
     assignments: dict[str, Assignment] = field(default_factory=dict)
+    # The epic's DB id when persistence is enabled (else None) — lets the CLI
+    # point `ai-os cost --epic <id>` at the run that just finished.
+    epic_id: Optional[str] = None
 
 
 class EpicRunner:
@@ -67,6 +74,7 @@ class EpicRunner:
         language: str,
         sandbox_runner=None,
         on_status_change: Optional[Callable[[str, str], None]] = None,
+        persistence: Optional["Persistence"] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.scheduler = scheduler
@@ -74,6 +82,10 @@ class EpicRunner:
         self.language = language
         self.sandbox_runner = sandbox_runner
         self.on_status_change = on_status_change
+        # Optional accounting (Stage 3). When set, the epic + a row per task are
+        # created up front (the audit tables FK to them), and each TaskRunner
+        # records token cost + lock audit + status against those rows.
+        self.persistence = persistence
         # Shared across every task in the epic — this is what makes Phase 2's
         # locking/merge serialization actually apply across concurrent tasks.
         self.lock_manager = LockManager()
@@ -121,7 +133,12 @@ class EpicRunner:
         return build_completion_agent_turn_executor(adapter, model=assignment.model)
 
     async def _run_one(
-        self, task: TaskNode, assignment: Assignment, engine: KnowledgeEngine, graph_json_path: Path
+        self,
+        task: TaskNode,
+        assignment: Assignment,
+        engine: KnowledgeEngine,
+        graph_json_path: Path,
+        epic_id: Optional[str],
     ) -> TaskRunResult:
         executor = self._build_executor(task, assignment, engine, graph_json_path)
         runner = TaskRunner(
@@ -131,10 +148,14 @@ class EpicRunner:
             agent_turn_executor=executor,
             sandbox_runner=self.sandbox_runner,
             on_status_change=self.on_status_change,
+            persistence=self.persistence,
+            epic_id=epic_id,
         )
         return await runner.run_task(task, language=self.language)
 
-    async def run_epic(self, tasks: list[TaskNode]) -> EpicRunResult:
+    async def run_epic(
+        self, tasks: list[TaskNode], epic_title: str = "epic", raw_prompt: str = ""
+    ) -> EpicRunResult:
         graph = planner.build_graph(tasks)
         planner.validate_acyclic(graph)
         batches = planner.topological_batches(graph)
@@ -142,6 +163,18 @@ class EpicRunner:
 
         result = EpicRunResult()
         result.assignments = self.plan_assignments(tasks)
+
+        # Accounting (Stage 3): create the epic + a row per task BEFORE running,
+        # since the token_cost/lock_audit tables FK to tasks -> epics.
+        epic_id: Optional[str] = None
+        if self.persistence is not None:
+            epic_id = uuid.uuid4().hex
+            result.epic_id = epic_id
+            await self.persistence.create_epic(epic_id, epic_title, raw_prompt, status="RUNNING")
+            for task in tasks:
+                await self.persistence.upsert_task(
+                    task, epic_id, assigned_model=result.assignments[task.id].model, status="PENDING"
+                )
 
         for batch in batches:
             engine = self._build_engine()  # fresh scan: later batches see earlier merges
@@ -166,7 +199,7 @@ class EpicRunner:
 
                 run_results = await asyncio.gather(
                     *(
-                        self._run_one(task, result.assignments[task.id], engine, graph_json_path)
+                        self._run_one(task, result.assignments[task.id], engine, graph_json_path, epic_id)
                         for task in runnable
                     )
                 )
@@ -177,5 +210,9 @@ class EpicRunner:
                     result.completed.append(task.id)
                 else:
                     result.blocked.append(task.id)
+
+        if self.persistence is not None and epic_id is not None:
+            final_status = "COMPLETED" if not result.blocked and not result.skipped else "FAILED"
+            await self.persistence.set_epic_status(epic_id, final_status)
 
         return result

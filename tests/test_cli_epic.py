@@ -32,15 +32,18 @@ def _patch_common(monkeypatch, tmp_path, executed_flag):
     (tmp_path / "a.py").write_text("x = 1\n")
     monkeypatch.setattr(cli_module.registry, "resolve", lambda n: tmp_path)
     monkeypatch.setattr(cli_module, "load_configured_adapters", lambda: {"anthropic": _FakeAdapter()})
+    # Isolate the accounting DB (Stage 3) to a throwaway home so the CLI never
+    # writes to the real ~/.ai-os during tests.
+    monkeypatch.setenv("AI_OS_HOME", str(tmp_path / "home"))
 
     async def fake_decompose(prompt, engine, adapter, model=None):
         return _PLAN
 
     monkeypatch.setattr(cli_module, "decompose", fake_decompose)
 
-    async def fake_run_epic(self, tasks):
+    async def fake_run_epic(self, tasks, epic_title="epic", raw_prompt=""):
         executed_flag["ran"] = True
-        return EpicRunResult(completed=["T1", "T2"], task_results={},
+        return EpicRunResult(completed=["T1", "T2"], task_results={}, epic_id="deadbeef",
                              assignments={t.id: Assignment("anthropic", "sonnet") for t in tasks})
 
     monkeypatch.setattr(cli_module.EpicRunner, "run_epic", fake_run_epic)
@@ -88,3 +91,41 @@ def test_epic_run_errors_without_providers(monkeypatch, tmp_path):
     )
     assert result.exit_code != 0
     assert "No LLM providers configured" in result.output
+
+
+# -- ai-os cost / ai-os epic history (Stage 3 readback) ----------------------
+
+
+def test_cost_and_history_read_back_persisted_spend(monkeypatch, tmp_path):
+    import asyncio
+
+    from ai_os.core.persistence import Persistence
+    from ai_os.core.models import TaskNode as _TN
+    from ai_os.mcp.adapters.base_adapter import TokenUsage as _TU
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("AI_OS_HOME", str(home))
+
+    async def _seed():
+        # Uses the same default_db_url() the CLI resolves under AI_OS_HOME.
+        from ai_os.core.persistence import default_db_url
+
+        persistence, engine = await Persistence.open(default_db_url())
+        try:
+            await persistence.create_epic("E1", "add auth", "add JWT auth", status="COMPLETED")
+            task = _TN(id="T1", title="t", description="d", risk_level="LOW", target_files=["a.py"], write_set={"a.py"})
+            await persistence.upsert_task(task, "E1", assigned_model="sonnet", status="COMPLETED")
+            await persistence.record_token_cost("T1", "anthropic", "sonnet", _TU(input_tokens=100, output_tokens=40, estimated_usd_cost=0.02))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_seed())
+
+    hist = CliRunner().invoke(cli_module.main, ["epic", "history"])
+    assert hist.exit_code == 0, hist.output
+    assert "add auth" in hist.output and "COMPLETED" in hist.output
+
+    cost = CliRunner().invoke(cli_module.main, ["cost"])
+    assert cost.exit_code == 0, cost.output
+    assert "anthropic" in cost.output and "sonnet" in cost.output
+    assert "0.0200" in cost.output
