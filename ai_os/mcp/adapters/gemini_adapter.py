@@ -36,6 +36,8 @@ from ai_os.mcp.adapters.base_adapter import (
     LLMTaskRequest,
     LLMTaskResponse,
     TokenUsage,
+    ToolDispatch,
+    ToolSpec,
 )
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -113,4 +115,135 @@ class GeminiAdapter(BaseMCPAdapter):
             model_name=model,
             generated_text=generated_text,
             usage=usage,
+        )
+
+    def supports_tool_calling(self) -> bool:
+        return True
+
+    async def _generate_content(self, model: str, payload: dict) -> dict:
+        """One generateContent round-trip: POST + shared error handling.
+
+        Returns the parsed JSON body. Raises GeminiApiError on a non-2xx
+        response, a non-JSON body, or an empty/blocked `candidates` list — the
+        same failure handling as `execute_task`, factored out for reuse by the
+        tool-calling loop.
+        """
+        url = f"{GEMINI_API_BASE}/{model}:generateContent?key={self.api_key}"
+        response = await self.client.post(url, json=payload)
+
+        if response.status_code < 200 or response.status_code >= 300:
+            raise GeminiApiError(
+                f"Gemini API returned HTTP {response.status_code} for model "
+                f"'{model}': {response.text}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise GeminiApiError(
+                f"Gemini API returned a non-JSON response for model '{model}': {response.text}"
+            ) from exc
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            block_reason = (data.get("promptFeedback") or {}).get("blockReason")
+            reason_suffix = f" (blockReason={block_reason!r})" if block_reason else ""
+            raise GeminiApiError(
+                f"Gemini API returned no candidates for model '{model}'{reason_suffix} — "
+                "the prompt was likely blocked by safety filtering."
+            )
+
+        return data
+
+    async def execute_with_tools(
+        self,
+        request: LLMTaskRequest,
+        tools: list[ToolSpec],
+        dispatch: ToolDispatch,
+        max_tool_iterations: int = 25,
+    ) -> LLMTaskResponse:
+        """Gemini native function-calling agentic loop (the multi-turn version of
+        `execute_task`) against the same `generateContent` endpoint.
+
+        Each `ToolSpec` becomes one `functionDeclaration`. When the model emits
+        `functionCall` parts, every call is dispatched, its result appended as a
+        `functionResponse` part, and generateContent is called again — until the
+        model returns a turn with no functionCall parts (its final text answer).
+        A runaway loop (no final answer within `max_tool_iterations` round-trips)
+        is an error, not a silent truncation.
+        """
+        model = request.model or self.model
+
+        function_declarations = [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.json_schema,
+            }
+            for tool in tools
+        ]
+
+        contents: list[dict] = [
+            {"role": "user", "parts": [{"text": request.context_payload}]}
+        ]
+
+        base_payload: dict = {"tools": [{"functionDeclarations": function_declarations}]}
+        if request.system_prompt:
+            base_payload["systemInstruction"] = {
+                "parts": [{"text": request.system_prompt}]
+            }
+
+        total_usage = TokenUsage()
+
+        for _ in range(max_tool_iterations):
+            payload = {**base_payload, "contents": contents}
+            data = await self._generate_content(model, payload)
+
+            usage_meta = data.get("usageMetadata") or {}
+            total_usage = total_usage + TokenUsage(
+                input_tokens=usage_meta.get("promptTokenCount", 0),
+                output_tokens=usage_meta.get("candidatesTokenCount", 0),
+                estimated_usd_cost=0.0,
+            )
+
+            candidate = data["candidates"][0]
+            parts = ((candidate.get("content") or {}).get("parts")) or []
+
+            function_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+
+            if not function_calls:
+                text = "".join(p["text"] for p in parts if "text" in p)
+                return LLMTaskResponse(
+                    task_id=request.task_id,
+                    provider="gemini",
+                    model_name=model,
+                    generated_text=text,
+                    usage=total_usage,
+                )
+
+            # Append the model's turn verbatim (preserves functionCall parts,
+            # including any text parts it emitted alongside them).
+            contents.append({"role": "model", "parts": parts})
+
+            # Dispatch every requested call, then append all their responses in a
+            # single user turn before re-calling (handles parallel function calls).
+            response_parts: list[dict] = []
+            for call in function_calls:
+                name = call["name"]
+                args = call.get("args") or {}
+                result_text = await dispatch(name, args)
+                function_response: dict = {
+                    "name": name,
+                    "response": {"result": result_text},
+                }
+                if "id" in call:
+                    function_response["id"] = call["id"]
+                response_parts.append({"functionResponse": function_response})
+
+            contents.append({"role": "user", "parts": response_parts})
+
+        raise GeminiApiError(
+            f"Gemini tool-calling loop exceeded max_tool_iterations="
+            f"{max_tool_iterations} for model '{model}' without producing a final "
+            "text answer (the model kept requesting tool calls)."
         )

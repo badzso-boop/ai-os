@@ -41,12 +41,16 @@ construction (`OpenRouterAdapter(..., model=...)`); if neither is set,
 """
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from ai_os.mcp.adapters.base_adapter import (
     BaseMCPAdapter,
     LLMTaskRequest,
     LLMTaskResponse,
+    ToolDispatch,
+    ToolSpec,
     TokenUsage,
 )
 
@@ -163,4 +167,157 @@ class OpenRouterAdapter(BaseMCPAdapter):
                 # stale the moment a routed provider repriced.
                 estimated_usd_cost=usage.get("cost", 0.0),
             ),
+        )
+
+    def supports_tool_calling(self) -> bool:
+        return True
+
+    def _build_headers(self) -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        # Optional attribution headers — see module docstring / `execute_task`.
+        if self.site_url:
+            headers["HTTP-Referer"] = self.site_url
+        if self.app_title:
+            headers["X-Title"] = self.app_title
+        return headers
+
+    @staticmethod
+    def _usage_from_body(body: dict) -> TokenUsage:
+        usage = body.get("usage") or {}
+        return TokenUsage(
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+            estimated_usd_cost=usage.get("cost", 0.0),
+        )
+
+    async def execute_with_tools(
+        self,
+        request: LLMTaskRequest,
+        tools: list[ToolSpec],
+        dispatch: ToolDispatch,
+        max_tool_iterations: int = 25,
+    ) -> LLMTaskResponse:
+        """Autonomous OpenAI-compatible function-calling loop against the same
+        OpenRouter chat/completions endpoint as `execute_task`.
+
+        Wire format verified against OpenRouter's official tool-calling docs
+        (https://openrouter.ai/docs/guides/features/tool-calling, fetched
+        2026-08-03): request `tools[]` are `{"type":"function","function":
+        {"name","description","parameters":<JSON Schema>}}`; the model asks to
+        call tools via `choices[0].message.tool_calls[]` (each `{"id","type":
+        "function","function":{"name","arguments":<JSON STRING>}}`) with
+        `finish_reason == "tool_calls"`; tool results are fed back as
+        `{"role":"tool","tool_call_id":<id>,"content":<text>}` messages, and
+        the `tools` parameter is resent on every follow-up request.
+        """
+        model = request.model or self.model
+        if not model:
+            raise ValueError(
+                "OpenRouterAdapter requires a model (per-request or at "
+                "construction) — there is no sensible default across "
+                "OpenRouter's many providers."
+            )
+
+        headers = self._build_headers()
+
+        # Map each provider-neutral ToolSpec into OpenRouter's OpenAI-compatible
+        # tool entry; `parameters` is the spec's JSON Schema verbatim.
+        tool_payload = [
+            {
+                "type": "function",
+                "function": {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "parameters": spec.json_schema,
+                },
+            }
+            for spec in tools
+        ]
+
+        messages: list[dict] = []
+        if request.system_prompt:
+            messages.append({"role": "system", "content": request.system_prompt})
+        messages.append({"role": "user", "content": request.context_payload})
+
+        total_usage = TokenUsage()
+        client = self._get_client()
+        last_model_name = model
+
+        for _ in range(max_tool_iterations):
+            payload = {
+                "model": model,
+                "messages": messages,
+                "tools": tool_payload,
+                "tool_choice": "auto",
+            }
+
+            response = await client.post(
+                OPENROUTER_API_URL, headers=headers, json=payload
+            )
+            if response.status_code // 100 != 2:
+                raise OpenRouterApiError(response.status_code, response.text)
+
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise OpenRouterApiError(response.status_code, response.text) from exc
+
+            total_usage = total_usage + self._usage_from_body(body)
+            last_model_name = body.get("model", model)
+
+            choices = body.get("choices") or []
+            if not choices or "message" not in choices[0]:
+                raise OpenRouterApiError(response.status_code, response.text)
+
+            choice = choices[0]
+            message = choice["message"]
+            tool_calls = message.get("tool_calls") or []
+
+            if not tool_calls:
+                # A normal assistant answer — we're done.
+                return LLMTaskResponse(
+                    task_id=request.task_id,
+                    provider="openrouter",
+                    model_name=last_model_name,
+                    generated_text=message.get("content") or "",
+                    usage=total_usage,
+                )
+
+            # Append the assistant turn verbatim (it must carry its tool_calls
+            # so the follow-up request keeps a consistent conversation).
+            messages.append(message)
+
+            for call in tool_calls:
+                call_id = call.get("id")
+                function = call.get("function") or {}
+                name = function.get("name")
+                raw_args = function.get("arguments")
+
+                try:
+                    parsed_args = json.loads(raw_args) if raw_args else {}
+                except (ValueError, TypeError) as exc:
+                    raise OpenRouterApiError(
+                        response.status_code,
+                        f"Model returned invalid JSON for tool '{name}' "
+                        f"arguments: {raw_args!r} ({exc})",
+                    ) from exc
+
+                result_text = await dispatch(name, parsed_args)
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": result_text,
+                    }
+                )
+
+        raise OpenRouterApiError(
+            0,
+            f"Tool-calling loop exceeded max_tool_iterations="
+            f"{max_tool_iterations} without a final answer (model kept "
+            f"requesting tools).",
         )

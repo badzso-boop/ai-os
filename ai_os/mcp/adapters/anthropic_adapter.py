@@ -57,6 +57,8 @@ from ai_os.mcp.adapters.base_adapter import (
     LLMTaskRequest,
     LLMTaskResponse,
     TokenUsage,
+    ToolDispatch,
+    ToolSpec,
 )
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
@@ -261,4 +263,131 @@ class AnthropicAdapter(BaseMCPAdapter):
                 # at from a hardcoded per-token price table that would go
                 # stale the moment Anthropic repriced a model.
             ),
+        )
+
+    # -- API-key mode: autonomous tool-calling loop ------------------------
+
+    def supports_tool_calling(self) -> bool:
+        """Only API-key mode has a real `execute_with_tools` loop.
+
+        CLI-session mode does its own tool-calling elsewhere (the task runner
+        spawns `claude --mcp-config`, see `ai_os.core.task_runner`), so this
+        adapter's `execute_with_tools` is only meaningful when it's talking to
+        the Messages API directly.
+        """
+        return bool(self.api_key) and not self.use_cli_session
+
+    async def execute_with_tools(
+        self,
+        request: LLMTaskRequest,
+        tools: list[ToolSpec],
+        dispatch: ToolDispatch,
+        max_tool_iterations: int = 25,
+    ) -> LLMTaskResponse:
+        """Run Anthropic's Messages-API tool-use loop (API-key mode only).
+
+        The multi-turn tool version of `_execute_via_api`: POST the prompt +
+        `tools`; whenever the model replies with `stop_reason == "tool_use"`,
+        run each requested tool via `dispatch`, feed the `tool_result`s back,
+        and POST again — until the model produces a non-`tool_use` turn (whose
+        `text` blocks are the final answer) or `max_tool_iterations` is hit.
+        `TokenUsage` is summed across every round-trip.
+        """
+        if self.use_cli_session:
+            raise ValueError(
+                "execute_with_tools is API-key-mode only. This adapter is in "
+                "CLI-session mode, whose tool-calling runs through "
+                "`claude --mcp-config` (wired up by ai_os.core.task_runner), "
+                "not through the Messages API loop. Configure the adapter with "
+                "an api_key to use execute_with_tools."
+            )
+        if not self.api_key:
+            raise ValueError(
+                "execute_with_tools requires API-key mode, but this adapter has "
+                "no api_key configured."
+            )
+
+        model = request.model or self.model
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": ANTHROPIC_API_VERSION,
+            "content-type": "application/json",
+        }
+        # Map the provider-neutral ToolSpec into Anthropic's tool schema:
+        # `json_schema` becomes the `input_schema` field.
+        api_tools = [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.json_schema,
+            }
+            for tool in tools
+        ]
+        messages: List[dict] = [
+            {"role": "user", "content": request.context_payload}
+        ]
+        total_usage = TokenUsage()
+
+        async with httpx.AsyncClient() as client:
+            for _ in range(max_tool_iterations):
+                body = {
+                    "model": model,
+                    "max_tokens": 4096,
+                    "system": request.system_prompt,
+                    "messages": messages,
+                    "tools": api_tools,
+                }
+                response = await client.post(
+                    ANTHROPIC_API_URL, headers=headers, json=body
+                )
+                if response.status_code // 100 != 2:
+                    raise AnthropicApiError(response.status_code, response.text)
+
+                payload = response.json()
+                usage = payload.get("usage") or {}
+                total_usage = total_usage + TokenUsage(
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                )
+
+                content = payload.get("content") or []
+                if payload.get("stop_reason") != "tool_use":
+                    # Terminal turn — the final answer is the text blocks'.
+                    text = "".join(
+                        block.get("text", "")
+                        for block in content
+                        if block.get("type") == "text"
+                    )
+                    return LLMTaskResponse(
+                        task_id=request.task_id,
+                        provider="anthropic",
+                        model_name=model,
+                        generated_text=text,
+                        usage=total_usage,
+                    )
+
+                # Echo the assistant turn verbatim (must include every block,
+                # not just the tool_use ones), then answer each tool_use block
+                # with one tool_result in a single following user turn.
+                messages.append({"role": "assistant", "content": content})
+                tool_results = []
+                for block in content:
+                    if block.get("type") != "tool_use":
+                        continue
+                    result_text = await dispatch(
+                        block["name"], block.get("input") or {}
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block["id"],
+                            "content": result_text,
+                        }
+                    )
+                messages.append({"role": "user", "content": tool_results})
+
+        raise AnthropicApiError(
+            0,
+            f"tool-calling loop did not terminate within "
+            f"max_tool_iterations={max_tool_iterations}",
         )

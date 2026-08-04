@@ -37,7 +37,11 @@ from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
 from ai_os.core.staging import GitStagingEngine
 from ai_os.knowledge.graph_engine import KnowledgeEngine
-from ai_os.mcp.adapters.base_adapter import BaseMCPAdapter, LLMTaskRequest
+from ai_os.mcp.adapters.base_adapter import (
+    BaseMCPAdapter,
+    LLMTaskRequest,
+    ToolSpec,
+)
 from ai_os.sandbox.container_runner import EphemeralSandboxRunner
 
 
@@ -364,5 +368,122 @@ def build_completion_agent_turn_executor(
             )
         for relpath, content in patches.items():
             _write_patch_within_worktree(ctx.worktree_path, relpath, content)
+
+    return execute
+
+
+# -- tool-calling agent turn (for HTTP providers WITH a native tool-use loop) -------
+
+TOOL_CALLING_SYSTEM_PROMPT = (
+    "You are a software engineering agent working inside an isolated git "
+    "worktree. You have tools to do your job — use them, do not just describe "
+    "changes in prose:\n"
+    "  - propose_file_patch(filepath, content, is_new_file): write the full new "
+    "contents of a file into the worktree.\n"
+    "  - fetch_symbol_definition(symbol_id): look up a symbol's skeleton from the "
+    "Knowledge Graph by its '<relpath>::<QualifiedName>' FQN.\n"
+    "  - trigger_sandbox_validation(): run the build/test suite against the "
+    "current worktree state and see whether it passes.\n"
+    "Workflow: make your edits with propose_file_patch, then call "
+    "trigger_sandbox_validation to confirm they pass. If validation fails, read "
+    "the output, fix the code, and validate again. When validation passes, stop "
+    "and briefly summarize what you changed."
+)
+
+
+def _calltool_result_to_text(result) -> str:
+    """Flatten an MCP `CallToolResult` into the plain text a `ToolDispatch`
+    must return: concatenate every `TextContent` block's `.text`. Error results
+    (`is_error=True`) are returned as text too — the model needs to *see* a
+    rejection or a failed validation to react to it, exactly as it would over a
+    real MCP transport (where the error text is delivered as the tool result)."""
+    parts = [
+        getattr(block, "text", "")
+        for block in (result.content or [])
+        if getattr(block, "type", None) == "text"
+    ]
+    return "\n".join(parts)
+
+
+def build_tool_calling_agent_turn_executor(
+    adapter: BaseMCPAdapter,
+    model: str | None,
+    knowledge_engine: KnowledgeEngine,
+    sandbox_runner: EphemeralSandboxRunner,
+    sandbox_language: str,
+) -> AgentTurnExecutor:
+    """Builds an `AgentTurnExecutor` for HTTP providers that DO support a native
+    autonomous tool-calling loop (Gemini, OpenRouter, Anthropic API-key mode) —
+    i.e. any adapter whose `supports_tool_calling()` is True.
+
+    Unlike the completion executor (one-shot: model returns whole files, AI-OS
+    writes them), this lets the model iterate: call `propose_file_patch` /
+    `fetch_symbol_definition` / `trigger_sandbox_validation`, see each result,
+    and keep working — the same agentic loop the Anthropic CLI-session path
+    gets, but driven through the provider's own function-calling API instead of
+    the `claude` CLI's built-in MCP client.
+
+    Crucially it reuses the EXACT SAME tool implementations as the MCP server
+    (`ai_os.mcp.mcp_server.dispatch_tool_call` against a `ToolContext`) — no
+    per-provider tool reimplementation. A fresh `ToolContext` is built per turn
+    because the worktree path is task-specific and only known at run time; the
+    Knowledge Graph engine + sandbox runner are shared in-process (no subprocess,
+    no graph JSON round-trip, unlike the CLI executor).
+    """
+    # Imported here (not at module top) to avoid a core -> mcp import at load
+    # time; the MCP tool catalog is only needed when this executor is actually
+    # built for a tool-capable provider.
+    from ai_os.mcp.mcp_server import (
+        TOOL_DEFINITIONS,
+        ToolContext,
+        dispatch_tool_call,
+    )
+
+    tool_specs = [
+        ToolSpec(
+            name=tool.name,
+            description=tool.description or "",
+            json_schema=tool.input_schema,
+        )
+        for tool in TOOL_DEFINITIONS
+    ]
+
+    async def execute(ctx: AgentTurnContext) -> None:
+        tool_context = ToolContext(
+            worktree_path=ctx.worktree_path,
+            knowledge_engine=knowledge_engine,
+            graph_load_error=None,
+            sandbox_runner=sandbox_runner,
+            sandbox_language=sandbox_language,
+        )
+
+        async def dispatch(name: str, arguments: dict) -> str:
+            result = await dispatch_tool_call(tool_context, name, arguments)
+            return _calltool_result_to_text(result)
+
+        prompt_parts = [
+            f"# Task: {ctx.task.title}",
+            ctx.task.description,
+            "",
+            f"## Files you are expected to change: {', '.join(ctx.task.target_files) or '(infer from the task)'}",
+            "",
+            "## Compressed context (relevant symbols from the Knowledge Graph)",
+            ctx.context_cache,
+        ]
+        if ctx.previous_validation_output:
+            prompt_parts += [
+                "",
+                f"## Attempt {ctx.attempt}: previous attempt's validation output (it FAILED)",
+                "Fix the code based on this output, then call "
+                "trigger_sandbox_validation again to confirm.",
+                ctx.previous_validation_output,
+            ]
+        request = LLMTaskRequest(
+            task_id=ctx.task.id,
+            system_prompt=TOOL_CALLING_SYSTEM_PROMPT,
+            context_payload="\n".join(prompt_parts),
+            model=model,
+        )
+        await adapter.execute_with_tools(request, tool_specs, dispatch)
 
     return execute

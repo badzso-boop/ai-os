@@ -12,7 +12,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Phase 3b — Ephemeral Sandbox & MCP Tool Server — is also implemented and stable.** `ai_os/sandbox/` (Docker-hardened validation runner, doc 10), `ai_os/mcp/mcp_server.py` (the real JSON-RPC/MCP tool server, doc 07 §3/§4), and `ai_os/core/task_runner.py` (the end-to-end orchestration loop with retries + HITL escalation) are all real, working, automated-tested code. Verified live end-to-end by the user: a real Claude model autonomously called the MCP tools, fixed real code, the sandbox validated it, and it merged to main.
 
-**Phase 4a — Epic Decomposition & Multi-Model Distribution — is implemented and stable.** `ai_os/core/epic_planner.py` (LLM decomposes a high-level request into a validated `TaskNode` DAG), `ai_os/core/scheduler.py` (`DynamicScheduler`: risk_level → provider+model), `ai_os/core/epic_runner.py` (runs the DAG batch-by-batch, tasks within a batch concurrent), and the completion-based agent executor in `task_runner.py` are all real, automated-tested code. **`ui/` (Phase 4b — the React Glass Box UI) is NOT built yet.** The plan-review HITL gate exists at the CLI level (`ai-os epic run` prompts for approval before executing), not as a web UI. **Scope boundary (unchanged from 3b)**: autonomous MCP tool-calling only works through the Anthropic CLI-session adapter; Gemini/OpenRouter/Anthropic-API-key tasks use the completion write-back path instead (the model returns full file contents, AI-OS writes them). Check the filesystem before assuming a module/command exists.
+**Phase 4a — Epic Decomposition & Multi-Model Distribution — is implemented and stable.** `ai_os/core/epic_planner.py` (LLM decomposes a high-level request into a validated `TaskNode` DAG), `ai_os/core/scheduler.py` (`DynamicScheduler`: risk_level → provider+model), `ai_os/core/epic_runner.py` (runs the DAG batch-by-batch, tasks within a batch concurrent), and the completion-based agent executor in `task_runner.py` are all real, automated-tested code. **`ui/` (Phase 4b — the React Glass Box UI) is NOT built yet.** The plan-review HITL gate exists at the CLI level (`ai-os epic run` prompts for approval before executing), not as a web UI. Check the filesystem before assuming a module/command exists.
+
+**Phase 5 Stage 1 — Multi-provider autonomous tool-calling — is implemented and stable.** The Phase-3b/4a scope boundary ("autonomous tool-calling only through the Anthropic CLI-session adapter") **no longer holds**: `execute_with_tools` now runs a real agentic tool-use loop over each HTTP provider's *native* function-calling API — Gemini (`functionDeclarations`/`functionCall`/`functionResponse`), OpenRouter (`tools`/`tool_calls`/role:"tool"), and Anthropic **API-key** mode (Messages `tools`/`tool_use`/`tool_result`). These reuse the exact same MCP tool implementations (`ai_os.mcp.mcp_server.dispatch_tool_call`) the Claude-CLI path uses — no per-provider tool reimplementation. Anthropic **CLI-session** mode still runs its own tool loop via `claude --mcp-config` (unchanged). See "Phase 5" below. **Still on the completion write-back path**: any adapter whose `supports_tool_calling()` is False (none of the built-in ones today, but a future/local adapter could be).
 
 ### Build / test
 
@@ -196,10 +198,40 @@ Closes the gap between "run one hand-specified task" (Phase 3b's `ai-os task run
 
 ### Explicitly out of scope for Phase 4a (not silently dropped)
 
-- Tool-calling loops for non-Anthropic-CLI providers — unchanged from Phase 3b; those use the completion write-back path.
-- Diff-based patching for large files (completion executor sends whole files).
+- ~~Tool-calling loops for non-Anthropic-CLI providers~~ — **done in Phase 5 Stage 1** (see below).
+- Diff-based patching for large files (completion executor sends whole files) — **planned as Phase 5 Stage 2, not yet built**.
 - The React Glass Box UI, WebSocket streaming, runtime preemption (Stage 2), Monaco manual-edit recovery (Stage 3) — Phase 4b.
-- Real TPM/RPM/cost-based scheduling (doc 02 §2.2) — still deferred.
+- Real TPM/RPM/cost-based scheduling (doc 02 §2.2) — **planned as Phase 5 Stage 4, not yet built**.
+
+---
+
+## Phase 5 — how it actually works (in progress)
+
+Closes four of the deliberately-deferred gaps, in four independently-committed stages. **Stage 1 (multi-provider autonomous tool-calling) is done**; Stages 2–4 (diff-based patching, LockAudit/TokenCost persistence, adaptive rate-limit/cost-aware scheduling) are planned but not yet built. Same testing philosophy as every prior phase: no real LLM/network/Docker in the automated suite (fake tool-calling adapters scripting a tool-call-then-final-answer sequence, `httpx.MockTransport` for the adapter wire-format tests, real disposable git repos + fake sandbox); the real "a live model autonomously calls tools over its own API" run stays a manual `ai-os epic run` step.
+
+### Stage 1 — Multi-provider autonomous tool-calling (implemented)
+
+The agentic loop lives **in each adapter**, because every provider's tool-use wire format differs. The shared contract is in `base_adapter.py`:
+- `ToolSpec(name, description, json_schema)` — provider-neutral tool description; `ToolDispatch = async (name, args_dict) -> str` — runs one tool and returns its text result; `ToolCallingNotSupported(NotImplementedError)`.
+- `BaseMCPAdapter.execute_with_tools(request, tools, dispatch, max_tool_iterations=25) -> LLMTaskResponse` — default impl raises `ToolCallingNotSupported` (an adapter without a real loop fails loudly, not silently); `supports_tool_calling() -> bool` — default False.
+- `TokenUsage.__add__` — accumulates usage across the loop's round-trips.
+
+Per-adapter loops (each verified against its provider's current function-calling schema, `httpx.MockTransport`-tested with a scripted tool-call→final-answer sequence):
+- **`gemini_adapter.py`** — `generateContent` `contents`/`functionCall`/`functionResponse` loop; a `functionResponse` wraps the tool's text as `{"result": text}`. `supports_tool_calling()` → True.
+- **`openrouter_adapter.py`** — OpenAI-compatible `tools`/`tool_calls` loop; `json.loads` the (string) `arguments` defensively; appends `role:"tool"` result messages. `supports_tool_calling()` → True.
+- **`anthropic_adapter.py`** — Messages-API `tools`/`tool_use`/`tool_result` loop, **API-key mode only**. `execute_with_tools` raises `ValueError` if called on a CLI-session-mode instance (that path does its own tool loop via `claude --mcp-config`); `supports_tool_calling()` is True only when an `api_key` is set and `use_cli_session` is False. Echoes the assistant's full content block list back before answering each `tool_use` with a `tool_result`.
+
+Wiring (in `task_runner.py` + `epic_runner.py`):
+- **`build_tool_calling_agent_turn_executor(adapter, model, knowledge_engine, sandbox_runner, sandbox_language)`** — builds a fresh `mcp_server.ToolContext` per turn (worktree path is task-specific, only known at run time; the KnowledgeEngine + sandbox runner are shared in-process — no subprocess, no graph-JSON round-trip, unlike the CLI executor), derives `ToolSpec`s from `mcp_server.TOOL_DEFINITIONS`, and wires `dispatch` to `mcp_server.dispatch_tool_call` (flattening its `CallToolResult` to text, error results included — the model must see a rejection/failed validation to react). So Gemini/OpenRouter/Anthropic-API tasks get the **same** `propose_file_patch`/`fetch_symbol_definition`/`trigger_sandbox_validation` the Claude-CLI path has, no duplicate tool logic.
+- **`EpicRunner._build_executor` now has three branches, most-specific first**: (1) anthropic + `use_cli_session` → `build_claude_cli_agent_turn_executor` (the CLI owns its MCP loop); (2) `adapter.supports_tool_calling()` → the new tool-calling executor; (3) else → completion write-back (`build_completion_agent_turn_executor`).
+
+Tests: `tests/test_gemini_tools.py`, `tests/test_openrouter_tools.py`, `tests/test_anthropic_tools.py` (per-adapter wire-format loops), `tests/test_tool_calling_executor.py` (a fake tool-calling adapter drives the real `dispatch` against a real worktree + fake sandbox — proves the bridge writes files and validates end-to-end, and that `EpicRunner` routes a `supports_tool_calling()` adapter through the tool loop, not the completion path).
+
+### Stages 2–4 — planned, not yet built
+
+- **Stage 2 — Diff/edit-based patching**: a new `apply_file_edit(filepath, old_string, new_string, replace_all)` MCP tool (search/replace edit blocks, Aider-style — NOT unified diffs) alongside `propose_file_patch`; completion + tool formats switch to edit blocks for existing files. Saves output tokens + fixes the "large files truncate" limitation.
+- **Stage 3 — LockAudit/TokenCost persistence**: new `ai_os/core/persistence.py` (thin async repo over `core/db/`), Epic/Task lifecycle rows, `AgentTurnExecutor` widened to return usage, best-effort/optional via an injected `session_factory`, `ai-os cost` / `ai-os epic history` CLI.
+- **Stage 4 — Adaptive rate-limit + cost-aware scheduling** (doc 02 §2.2): adapters surface a typed `RateLimitedError` on HTTP 429 (with `Retry-After`); a new `ai_os/core/scheduling_policy.py` adds exponential backoff + provider fallback (why risk→provider order is a list) + an optional `AI_OS_EPIC_BUDGET_USD` cap (reads Stage 3's TokenCost rows). Adaptive, NOT hardcoded TPM/RPM numbers.
 
 ---
 

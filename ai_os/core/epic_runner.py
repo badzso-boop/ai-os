@@ -40,9 +40,11 @@ from ai_os.core.task_runner import (
     TaskRunResult,
     build_claude_cli_agent_turn_executor,
     build_completion_agent_turn_executor,
+    build_tool_calling_agent_turn_executor,
 )
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import BaseMCPAdapter
+from ai_os.sandbox.container_runner import EphemeralSandboxRunner
 
 
 @dataclass
@@ -92,9 +94,9 @@ class EpicRunner:
         self, task: TaskNode, assignment: Assignment, engine: KnowledgeEngine, graph_json_path: Path
     ) -> AgentTurnExecutor:
         adapter = self.adapters[assignment.provider]
-        # Only the Anthropic CLI-session adapter can drive autonomous MCP tool
-        # calls; everything else (Gemini, OpenRouter, Anthropic API-key) uses
-        # the completion write-back path. See CLAUDE.md's scope boundary.
+        # Three execution paths, most-specific first:
+        # 1. Anthropic CLI-session — the `claude` CLI owns its own MCP tool loop
+        #    (spawned as a subprocess via --mcp-config).
         if assignment.provider == "anthropic" and getattr(adapter, "use_cli_session", False):
             return build_claude_cli_agent_turn_executor(
                 repo_root=self.repo_root,
@@ -103,6 +105,19 @@ class EpicRunner:
                 model=assignment.model or "claude-sonnet-4-5",
                 claude_cli=getattr(adapter, "claude_cli", "claude"),
             )
+        # 2. Any HTTP adapter with a native tool-calling loop (Gemini,
+        #    OpenRouter, Anthropic API-key) — real autonomous tool use through
+        #    the provider's own function-calling API, reusing the MCP tools.
+        if adapter.supports_tool_calling():
+            return build_tool_calling_agent_turn_executor(
+                adapter=adapter,
+                model=assignment.model,
+                knowledge_engine=engine,
+                sandbox_runner=self.sandbox_runner or EphemeralSandboxRunner(),
+                sandbox_language=self.language,
+            )
+        # 3. Fallback — completion write-back (model returns whole files, AI-OS
+        #    writes them). For adapters without a tool-calling loop.
         return build_completion_agent_turn_executor(adapter, model=assignment.model)
 
     async def _run_one(
