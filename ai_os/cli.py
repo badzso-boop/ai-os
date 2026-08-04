@@ -11,6 +11,7 @@ from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from ai_os import registry
@@ -19,6 +20,7 @@ from ai_os.analyzer.languages import LANGUAGES
 from ai_os.core.epic_planner import EpicPlanError, decompose
 from ai_os.core.epic_runner import EpicRunner
 from ai_os.core.lock_manager import LockManager
+from ai_os.core.conventions import load_project_conventions
 from ai_os.core.models import TaskNode
 from ai_os.core.persistence import Persistence, default_db_url
 from ai_os.core.scheduler import DynamicScheduler
@@ -443,16 +445,71 @@ def _print_plan_table(tasks, assignments) -> None:
     console.print(table)
 
 
+def _make_event_printer(verbose: bool):
+    """Return an `on_event` callback that renders the structured run events
+    (attempt, agent turn, sandbox validation, retry, merge) so the run is
+    debuggable instead of a black box. `verbose` dumps the full sandbox output
+    on failure; otherwise just the tail."""
+
+    def printer(ev: dict) -> None:
+        t = ev.get("type")
+        tid = ev.get("task_id", "?")
+        if t == "attempt":
+            files = ", ".join(ev.get("target_files") or []) or "(inferred)"
+            console.print(
+                f"[cyan]▶ {tid}[/cyan] attempt {ev['attempt']}/{ev['max_attempts']} — "
+                f"{ev.get('title', '')}  [dim]→ {files}[/dim]"
+            )
+        elif t == "agent_turn":
+            usd = ev.get("usd") or 0.0
+            cost = f" · ${usd:.4f}" if usd else ""
+            console.print(
+                f"  [dim]{tid} · agent: {ev.get('provider')}→{ev.get('model')} · "
+                f"{ev.get('input_tokens', 0)}in/{ev.get('output_tokens', 0)}out tok{cost}[/dim]"
+            )
+        elif t == "validation":
+            if ev.get("success"):
+                console.print(f"  [green]✓ {tid} sandbox passed[/green] (exit {ev.get('exit_code')})")
+            else:
+                console.print(
+                    f"  [red]✗ {tid} sandbox FAILED[/red] (exit {ev.get('exit_code')}) — "
+                    f"{ev.get('summary', '')}"
+                )
+                out = (ev.get("output") or "").strip()
+                if out:
+                    tail = out if verbose else "\n".join(out.splitlines()[-12:])
+                    console.print(Panel(
+                        tail, title=f"{tid} sandbox output{'' if verbose else ' (tail)'}",
+                        border_style="red", expand=False,
+                    ))
+        elif t == "merge_conflict":
+            console.print(f"  [yellow]⚠ {tid} merge conflict[/yellow] — {ev.get('output', '')}")
+        elif t == "retry":
+            console.print(f"  [yellow]↻ {tid} retrying (attempt {ev.get('next_attempt')})[/yellow]")
+        elif t == "merged":
+            console.print(f"  [green]✓ {tid} merged[/green]")
+
+    return printer
+
+
 @epic.command("run")
 @click.argument("name_or_path")
 @click.option("--prompt", required=True, help="High-level request to decompose, e.g. 'add JWT auth'.")
 @click.option("--language", required=True, type=click.Choice(_LANGUAGE_CHOICES))
 @click.option("--yes", is_flag=True, help="Skip the plan-review approval gate and run immediately.")
-def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
+@click.option("--merge-to-main", is_flag=True, help="Merge straight to main instead of opening a pull request (the default).")
+@click.option("--pr-base", default="main", show_default=True, help="Base branch the PR targets (and the integration branch forks from).")
+@click.option("--verbose", "-v", is_flag=True, help="Show full sandbox output on failures (default: just the tail).")
+def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_main: bool, pr_base: str, verbose: bool) -> None:
     """Decompose PROMPT against NAME_OR_PATH into a task DAG, show the plan for
     approval (HITL Stage 1), then execute it — routing each task to a model by
     its risk level via the providers configured in .env. Makes REAL LLM calls
     (planning + each task) and consumes real usage/quota.
+
+    By default the epic's work is gathered on a per-epic integration branch and
+    a single pull request is opened (via `gh`); pass --merge-to-main to merge
+    directly to main instead. If PR mode can't reach a git remote or `gh`, it
+    falls back to a local merge so nothing is lost.
     """
     try:
         root = registry.resolve(name_or_path)
@@ -472,6 +529,10 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
     engine = KnowledgeEngine()
     engine.build_from_scan(scan_result)
 
+    conventions = load_project_conventions(root)
+    if conventions:
+        console.print("[dim]Loaded .ai-os/conventions.md — injecting into the plan + every task.[/dim]")
+
     plan_assignment = scheduler.planning_assignment()
     console.print(
         f"Decomposing the request with [bold]{plan_assignment.provider}[/bold] "
@@ -479,7 +540,8 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
     )
     try:
         tasks = asyncio.run(
-            decompose(prompt, engine, adapters[plan_assignment.provider], model=plan_assignment.model)
+            decompose(prompt, engine, adapters[plan_assignment.provider],
+                      model=plan_assignment.model, conventions=conventions)
         )
     except EpicPlanError as exc:
         raise click.ClickException(f"Planning failed: {exc}") from exc
@@ -507,11 +569,18 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
         runner = EpicRunner(
             repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
             sandbox_runner=EphemeralSandboxRunner(),
-            on_status_change=lambda tid, status: console.print(f"[dim]{tid}: {status}[/dim]"),
+            # Terminal states only — the attempt/validation events (on_event)
+            # cover the in-flight detail, so RUNNING would just be noise.
+            on_status_change=lambda tid, status: (
+                console.print(f"[dim]{tid}: {status}[/dim]") if status != "RUNNING" else None
+            ),
             persistence=persistence,
             # Stage 4: rate-limit backoff + provider fallback always on; the
             # optional cost cap comes from AI_OS_EPIC_BUDGET_USD in the env.
             scheduling_policy=SchedulingPolicy.from_env(),
+            create_pr=not merge_to_main,
+            pr_base_branch=pr_base,
+            on_event=_make_event_printer(verbose),
         )
         try:
             return await runner.run_epic(tasks, epic_title=prompt[:120], raw_prompt=prompt)
@@ -524,6 +593,15 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
     console.print(f"  [green]Completed[/green]: {', '.join(result.completed) or '-'}")
     console.print(f"  [red]Blocked[/red]:   {', '.join(result.blocked) or '-'}")
     console.print(f"  [yellow]Skipped[/yellow]:   {', '.join(result.skipped) or '-'}")
+    if result.pull_request_url:
+        console.print(f"\n  [bold green]Pull request opened:[/bold green] {result.pull_request_url}")
+    elif result.integration_branch and result.merged_to_main:
+        console.print(
+            f"\n  [yellow]No git remote / gh — merged to {pr_base} locally.[/yellow] "
+            f"Work is on branch [bold]{result.integration_branch}[/bold] (and {pr_base})."
+        )
+    elif result.integration_branch and result.completed:
+        console.print(f"\n  Work gathered on branch [bold]{result.integration_branch}[/bold].")
     if result.epic_id:
         console.print(f"\n[dim]Accounting saved. See:[/dim] ai-os cost --epic {result.epic_id}")
 
@@ -565,7 +643,10 @@ def epic_history() -> None:
 @click.argument("name_or_path")
 @click.option("--epic", "epic_id", required=True, help="The epic id to resume (see `ai-os epic history`).")
 @click.option("--language", required=True, type=click.Choice(_LANGUAGE_CHOICES))
-def epic_resume(name_or_path: str, epic_id: str, language: str) -> None:
+@click.option("--merge-to-main", is_flag=True, help="Merge straight to main instead of opening a pull request (the default).")
+@click.option("--pr-base", default="main", show_default=True, help="Base branch the PR targets.")
+@click.option("--verbose", "-v", is_flag=True, help="Show full sandbox output on failures (default: just the tail).")
+def epic_resume(name_or_path: str, epic_id: str, language: str, merge_to_main: bool, pr_base: str, verbose: bool) -> None:
     """Resume a crashed/interrupted epic: re-run only the tasks that weren't
     already COMPLETED (their merged work is kept), respecting the DAG. The task
     statuses come from the accounting DB; you supply the project + language
@@ -589,9 +670,14 @@ def epic_resume(name_or_path: str, epic_id: str, language: str) -> None:
         runner = EpicRunner(
             repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
             sandbox_runner=EphemeralSandboxRunner(),
-            on_status_change=lambda tid, status: console.print(f"[dim]{tid}: {status}[/dim]"),
+            on_status_change=lambda tid, status: (
+                console.print(f"[dim]{tid}: {status}[/dim]") if status != "RUNNING" else None
+            ),
             persistence=persistence,
             scheduling_policy=SchedulingPolicy.from_env(),
+            create_pr=not merge_to_main,
+            pr_base_branch=pr_base,
+            on_event=_make_event_printer(verbose),
         )
         try:
             return await runner.resume_epic(epic_id)
@@ -607,6 +693,10 @@ def epic_resume(name_or_path: str, epic_id: str, language: str) -> None:
     console.print(f"  [green]Completed[/green]: {', '.join(result.completed) or '-'}")
     console.print(f"  [red]Blocked[/red]:   {', '.join(result.blocked) or '-'}")
     console.print(f"  [yellow]Skipped[/yellow]:   {', '.join(result.skipped) or '-'}")
+    if result.pull_request_url:
+        console.print(f"\n  [bold green]Pull request opened:[/bold green] {result.pull_request_url}")
+    elif result.integration_branch and result.merged_to_main:
+        console.print(f"\n  [yellow]No git remote / gh — merged to {pr_base} locally.[/yellow]")
 
 
 @main.command("cost")

@@ -45,25 +45,27 @@ def test_java_profile_is_maven_two_phase():
     assert profile.command == "mvn -o -Dmaven.repo.local=/deps/.m2 test"
 
 
-def test_two_phase_profiles_declare_manifests_and_install():
-    # Every ecosystem that needs third-party deps has a phase-1 config.
+def test_mount_isolation_profiles_declare_manifests_and_install():
+    # Python + Java use bind-mount two-phase: a manifest + install command.
     for language, manifests in {
         "python": ("requirements.txt",),
-        "javascript": ("package.json", "package-lock.json"),
-        "typescript": ("package.json", "package-lock.json"),
         "java": ("pom.xml",),
     }.items():
         profile = SANDBOX_PROFILES[language]
+        assert profile.isolation == "mount"
         assert profile.dependency_manifests == manifests
         assert profile.install_command  # non-empty
 
 
-def test_node_profiles_point_node_path_at_out_of_tree_deps():
+def test_node_profiles_use_copy_isolation():
+    # Node uses copy-isolation (code + node_modules in one image, no bind mount)
+    # so Vite/Vitest/Next resolve node_modules from the tree.
     for language in ("javascript", "typescript"):
         profile = SANDBOX_PROFILES[language]
-        env = dict(profile.run_env)
-        assert env["NODE_PATH"] == "/deps/node_modules"
-        assert env["PATH"].startswith("/deps/node_modules/.bin:")
+        assert profile.isolation == "copy"
+        # all package-manager lockfiles are candidate manifests (pnpm/yarn/npm)
+        assert "package.json" in profile.dependency_manifests
+        assert "pnpm-lock.yaml" in profile.dependency_manifests
 
 
 @pytest.mark.parametrize("language", ALL_LANGUAGES)

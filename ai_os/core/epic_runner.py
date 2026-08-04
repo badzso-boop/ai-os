@@ -23,6 +23,7 @@ relative to an LLM turn, and correctness (no stale context) beats shaving it.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -43,6 +44,7 @@ from ai_os.core.task_runner import (
     build_completion_agent_turn_executor,
     build_tool_calling_agent_turn_executor,
 )
+from ai_os.core.conventions import load_project_conventions
 from ai_os.core.scheduling_policy import BudgetExceededError, SchedulingPolicy
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import BaseMCPAdapter
@@ -64,6 +66,15 @@ class EpicRunResult:
     # The epic's DB id when persistence is enabled (else None) — lets the CLI
     # point `ai-os cost --epic <id>` at the run that just finished.
     epic_id: Optional[str] = None
+    # Set in PR mode when a pull request was opened (else None). The integration
+    # branch that gathered the epic's work (whether a PR was opened or it was
+    # merged to main) is `integration_branch`.
+    pull_request_url: Optional[str] = None
+    integration_branch: Optional[str] = None
+    # True if PR mode fell back to a local merge-to-main (no git remote / no gh).
+    merged_to_main: bool = False
+    # The original high-level prompt (for the PR title/body); empty on resume.
+    raw_prompt: str = ""
 
 
 class EpicRunner:
@@ -77,6 +88,9 @@ class EpicRunner:
         on_status_change: Optional[Callable[[str, str], None]] = None,
         persistence: Optional["Persistence"] = None,
         scheduling_policy: Optional[SchedulingPolicy] = None,
+        create_pr: bool = True,
+        pr_base_branch: str = "main",
+        on_event: Optional[Callable[[dict], None]] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.scheduler = scheduler
@@ -84,6 +98,20 @@ class EpicRunner:
         self.language = language
         self.sandbox_runner = sandbox_runner
         self.on_status_change = on_status_change
+        # PR mode (default): gather the epic's tasks on a per-epic integration
+        # branch and open ONE pull request (base = pr_base_branch) at the end,
+        # instead of merging each task straight to main. `create_pr=False`
+        # (CLI `--merge-to-main`) restores the direct merge-to-main behavior.
+        # If PR mode can't reach a git remote or `gh`, it falls back to a local
+        # merge into pr_base_branch (so nothing is lost).
+        self.create_pr = create_pr
+        self.pr_base_branch = pr_base_branch
+        # Structured observability hook threaded into every TaskRunner (see
+        # TaskRunner.on_event) so the CLI can show what each task is doing.
+        self.on_event = on_event
+        # Repo-side `.ai-os/conventions.md`, injected into every task's prompt so
+        # all providers follow the project's rules (i18n, UI library, …).
+        self.project_conventions = load_project_conventions(self.repo_root)
         # Optional accounting (Stage 3). When set, the epic + a row per task are
         # created up front (the audit tables FK to them), and each TaskRunner
         # records token cost + lock audit + status against those rows.
@@ -184,6 +212,8 @@ class EpicRunner:
             on_status_change=self.on_status_change,
             persistence=self.persistence,
             epic_id=epic_id,
+            on_event=self.on_event,
+            project_conventions=self.project_conventions,
         )
         return await runner.run_task(task, language=self.language)
 
@@ -210,6 +240,7 @@ class EpicRunner:
     ) -> EpicRunResult:
         result = EpicRunResult()
         result.assignments = self.plan_assignments(tasks)
+        result.raw_prompt = raw_prompt
 
         # Accounting (Stage 3): create the epic + a row per task BEFORE running,
         # since the token_cost/lock_audit tables FK to tasks -> epics.
@@ -268,6 +299,15 @@ class EpicRunner:
         by_id = {t.id: t for t in tasks}
         already_done = set(result.completed)
 
+        # PR mode: gather the epic's work on a per-epic integration branch (tasks
+        # merge into it, not straight to main), so one PR can be opened at the
+        # end. In merge-to-main mode, staging keeps its default base ("main").
+        if self.create_pr:
+            branch = f"ai-os/epic-{epic_id or uuid.uuid4().hex[:12]}"
+            await self.staging.create_integration_branch(branch, from_ref=self.pr_base_branch)
+            self.staging.base_branch = branch
+            result.integration_branch = branch
+
         budget_hit = False
         for batch in batches:
             # Cost cap (Stage 4): before starting a batch, if the epic's spend so
@@ -318,8 +358,85 @@ class EpicRunner:
                 if t.id not in result.completed and t.id not in result.blocked and t.id not in result.skipped:
                     result.skipped.append(t.id)
 
+        # PR mode finalize: open one PR from the integration branch, or (no
+        # remote / no gh) fall back to a local merge into the base branch.
+        if self.create_pr and result.integration_branch and result.completed:
+            await self._finalize_pr(result, tasks)
+
         if self.persistence is not None and epic_id is not None:
             final_status = "COMPLETED" if not result.blocked and not result.skipped else "FAILED"
             await self.persistence.set_epic_status(epic_id, final_status)
 
         return result
+
+    async def _finalize_pr(self, result: EpicRunResult, tasks: list[TaskNode]) -> None:
+        """Open a PR from the integration branch (base = pr_base_branch), or fall
+        back to a local ff-merge into pr_base_branch when there's no git remote
+        or no `gh` CLI — so the work is never lost, just not PR'd. The PR body
+        includes the decomposed DAG (what AI-OS planned and did)."""
+        branch = result.integration_branch
+        gh_available = shutil.which("gh") is not None
+        has_remote = await self.staging.has_remote()
+
+        if gh_available and has_remote:
+            title, body = self._build_pr_content(result, tasks)
+            try:
+                await self.staging.push_branch(branch)
+                result.pull_request_url = await self.staging.open_pull_request(
+                    head=branch, base=self.pr_base_branch, title=title, body=body
+                )
+                return
+            except Exception:
+                # PR creation failed (auth, network, existing PR, …) — don't lose
+                # the work; fall through to the local merge below.
+                pass
+
+        # Fallback: merge the integration branch into the base branch locally.
+        await self.staging.merge_branch_ff(branch, target=self.pr_base_branch)
+        result.merged_to_main = True
+
+    def _build_pr_content(self, result: EpicRunResult, tasks: list[TaskNode]) -> tuple[str, str]:
+        """Build the PR title + Markdown body — including the decomposed DAG as a
+        table (id, title, risk, routed model, dependencies, per-task outcome) so a
+        reviewer can see exactly what AI-OS planned and did."""
+        prompt = (result.raw_prompt or "").strip()
+        first_line = prompt.splitlines()[0] if prompt else f"{len(result.completed)} task(s)"
+        title = f"AI-OS: {first_line[:100]}"
+
+        status_by_id: dict[str, str] = {}
+        for tid in result.completed:
+            status_by_id[tid] = "✅ merged"
+        for tid in result.blocked:
+            status_by_id[tid] = "⛔ blocked"
+        for tid in result.skipped:
+            status_by_id[tid] = "⏭️ skipped"
+
+        lines = ["## What AI-OS did", ""]
+        if prompt:
+            lines += ["> " + prompt.replace("\n", "\n> "), ""]
+        lines += [
+            "**Execution plan (decomposed DAG):**",
+            "",
+            "| Task | Title | Risk | Routed to | Depends on | Result |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for task in tasks:
+            assignment = result.assignments.get(task.id)
+            routed = "—"
+            if assignment is not None:
+                routed = f"{assignment.provider} → {assignment.model or 'default'}"
+            deps = ", ".join(task.dependencies) or "—"
+            outcome = status_by_id.get(task.id, "—")
+            title_cell = task.title.replace("|", "\\|")
+            lines.append(f"| {task.id} | {title_cell} | {task.risk_level} | {routed} | {deps} | {outcome} |")
+
+        lines += [
+            "",
+            f"**Completed:** {len(result.completed)}  ·  "
+            f"**Blocked:** {len(result.blocked)}  ·  "
+            f"**Skipped:** {len(result.skipped)}",
+        ]
+        if result.epic_id:
+            lines += ["", f"<sub>AI-OS epic `{result.epic_id}` — see `ai-os cost --epic {result.epic_id}` for spend.</sub>"]
+        lines += ["", "🤖 Generated by [AI-OS](https://github.com/badzso-boop/ai-os)."]
+        return title, "\n".join(lines)

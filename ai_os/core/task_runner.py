@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
+from ai_os.core.conventions import conventions_block
 from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
 from ai_os.core.staging import GitStagingEngine
@@ -62,6 +63,9 @@ class AgentTurnContext:
     context_cache: str
     attempt: int  # 1-based
     previous_validation_output: str | None
+    # Repo-side `.ai-os/conventions.md` (or ""), injected into every executor's
+    # prompt so all providers follow the project's rules (i18n, UI library, …).
+    project_conventions: str = ""
 
 
 @dataclass
@@ -108,12 +112,21 @@ class TaskRunner:
         on_status_change: Optional[Callable[[str, str], None]] = None,
         persistence: Optional["Persistence"] = None,
         epic_id: Optional[str] = None,
+        on_event: Optional[Callable[[dict], None]] = None,
+        project_conventions: str = "",
     ) -> None:
+        self.project_conventions = project_conventions
         self.lock_manager = lock_manager
         self.staging = staging
         self.knowledge_engine = knowledge_engine
         self.agent_turn_executor = agent_turn_executor
         self.sandbox_runner = sandbox_runner or EphemeralSandboxRunner()
+        # Optional structured observability hook: receives dict events describing
+        # what's happening inside a task run (attempt start, agent turn + model,
+        # sandbox validation result, merge outcome, retry). The CLI subscribes to
+        # this to make the run debuggable instead of a black box. Never raises
+        # into the run (a bad printer must not abort a generation).
+        self.on_event = on_event
         # Optional, deliberately thin status-transition hook (task_id, status)
         # -> None. Kept as a plain callback rather than a direct SQLAlchemy
         # dependency so this module doesn't need to assume a TaskModel row
@@ -134,6 +147,16 @@ class TaskRunner:
             self.on_status_change(task_id, status)
         if self.persistence is not None:
             await self._safe_persist(self.persistence.update_task_status(task_id, status))
+
+    def _emit(self, **event) -> None:
+        """Fire a structured observability event, swallowing any printer error
+        (observability must never break a run)."""
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(event)
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     @staticmethod
     async def _safe_persist(coro: Awaitable[None]) -> None:
@@ -174,14 +197,27 @@ class TaskRunner:
             max_attempts = task.max_retries + 1
             attempt = 0
             for attempt in range(1, max_attempts + 1):
+                self._emit(
+                    type="attempt", task_id=task.id, attempt=attempt, max_attempts=max_attempts,
+                    title=task.title, target_files=list(task.target_files),
+                )
                 turn_ctx = AgentTurnContext(
                     task=task,
                     worktree_path=worktree_path,
                     context_cache=context_cache,
                     attempt=attempt,
                     previous_validation_output=last_output,
+                    project_conventions=self.project_conventions,
                 )
                 turn_usage = await self.agent_turn_executor(turn_ctx)
+                if turn_usage is not None:
+                    self._emit(
+                        type="agent_turn", task_id=task.id, attempt=attempt,
+                        provider=turn_usage.provider, model=turn_usage.model_name,
+                        input_tokens=turn_usage.usage.input_tokens,
+                        output_tokens=turn_usage.usage.output_tokens,
+                        usd=turn_usage.usage.estimated_usd_cost,
+                    )
                 if self.persistence is not None and turn_usage is not None:
                     await self._safe_persist(
                         self.persistence.record_token_cost(
@@ -196,12 +232,18 @@ class TaskRunner:
                     validator_ran = True
                     result = await self.sandbox_runner.run_validation(wt_path, language)
                     last_output = result.output
+                    self._emit(
+                        type="validation", task_id=task.id, attempt=attempt,
+                        success=result.success, exit_code=result.exit_code,
+                        summary=result.summary, output=result.output,
+                    )
                     return result.success
 
                 merged = await self.staging.stage_and_merge_task(
                     task.id, f"{task.id}: attempt {attempt}", validator
                 )
                 if merged:
+                    self._emit(type="merged", task_id=task.id, attempt=attempt)
                     await self._report_status(task.id, "COMPLETED")
                     return TaskRunResult(
                         task_id=task.id, status="COMPLETED", attempts=attempt, final_output=last_output
@@ -215,6 +257,11 @@ class TaskRunner:
                         "Merge failed before validation ran (likely a rebase "
                         "conflict against the base branch)."
                     )
+                    self._emit(
+                        type="merge_conflict", task_id=task.id, attempt=attempt, output=last_output
+                    )
+                if attempt < max_attempts:
+                    self._emit(type="retry", task_id=task.id, next_attempt=attempt + 1)
 
             await self.staging.abandon_task(task.id)
             await self._report_status(task.id, "BLOCKED")
@@ -280,7 +327,7 @@ def build_claude_cli_agent_turn_executor(
                 "this output, then call trigger_sandbox_validation again to confirm.",
                 ctx.previous_validation_output,
             ]
-        prompt = "\n".join(prompt_parts)
+        prompt = "\n".join(prompt_parts) + conventions_block(ctx.project_conventions)
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", prefix="ai-os-mcp-config-", delete=False
@@ -400,7 +447,10 @@ COMPLETION_SYSTEM_PROMPT = (
     "fences; write no prose outside the blocks. If you introduce a new "
     "third-party dependency, also update the project's dependency manifest "
     "(requirements.txt / package.json / pom.xml) in a block — the sandbox "
-    "installs those before running the tests."
+    "installs those before running the tests. If your change alters the "
+    "database schema, also update the schema migration AND the reference-data "
+    "seed the sandbox runs (the seed script named in .ai-os/sandbox.json's "
+    "setup_commands, or a new seed migration) so the DB-backed tests still pass."
 )
 
 
@@ -541,7 +591,7 @@ def build_completion_agent_turn_executor(
         request = LLMTaskRequest(
             task_id=ctx.task.id,
             system_prompt=COMPLETION_SYSTEM_PROMPT,
-            context_payload="\n".join(prompt_parts),
+            context_payload="\n".join(prompt_parts) + conventions_block(ctx.project_conventions),
             model=model,
         )
         response = await adapter.execute_task(request)
@@ -585,7 +635,10 @@ TOOL_CALLING_SYSTEM_PROMPT = (
     "IMPORTANT: if your change introduces a new third-party dependency, add it to "
     "the project's dependency manifest (requirements.txt for Python, package.json "
     "for Node, pom.xml for Java) — the sandbox installs those before running the "
-    "tests, so an unlisted dependency will make validation fail."
+    "tests, so an unlisted dependency will make validation fail. Likewise, if you "
+    "change the database schema, update the schema migration AND the "
+    "reference-data seed the sandbox runs (the seed named in .ai-os/sandbox.json's "
+    "setup_commands, or a new seed migration) so the DB-backed tests still pass."
 )
 
 
@@ -679,7 +732,7 @@ def build_tool_calling_agent_turn_executor(
         request = LLMTaskRequest(
             task_id=ctx.task.id,
             system_prompt=TOOL_CALLING_SYSTEM_PROMPT,
-            context_payload="\n".join(prompt_parts),
+            context_payload="\n".join(prompt_parts) + conventions_block(ctx.project_conventions),
             model=model,
         )
         response = await adapter.execute_with_tools(request, tool_specs, dispatch)

@@ -101,7 +101,7 @@ The first four phases of the planned architecture are **implemented, tested, and
 | **5** | Multi-provider autonomous tool-calling, edit-based patching, cost/lock accounting, adaptive scheduling | ✅ done |
 | **4b** | Glass Box UI (React) & full 3-stage HITL web flow | ⛔ not built |
 
-The system works **end-to-end from the command line today**: give it a high-level request, it decomposes the work into a task DAG, routes each task to a model by risk, lets the model autonomously call tools to edit code, validates every change in a sandbox, and merges to `main` — recording token/USD spend along the way. See `CLAUDE.md` for the per-phase "how it actually works" detail and the documented trade-offs/limitations.
+The system works **end-to-end from the command line today**: give it a high-level request, it decomposes the work into a task DAG, routes each task to a model by risk, lets the model autonomously call tools to edit code, validates every change in a sandbox, and **opens a pull request** (or merges to `main` with `--merge-to-main`) — recording token/USD spend along the way. See `CLAUDE.md` for the per-phase "how it actually works" detail and the documented trade-offs/limitations.
 
 ---
 
@@ -119,7 +119,7 @@ cd ai-os
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # 2. Run the test suite (real Docker containers; never makes a real LLM/network call)
-.venv/bin/pytest -q          # 319 tests (315 passed + 3 skipped opt-in + 1 documented xfail), ~55s
+.venv/bin/pytest -q          # 345 tests (339 passed + 6 skipped opt-in + 1 documented xfail), ~52s
 
 # 3. One-time: build the sandbox image used to validate Python tasks
 #    (bakes pytest in, since the sandbox runs with --network none)
@@ -224,10 +224,14 @@ ai-os task run my-project \
 
 Decomposes a high-level request into a task DAG, shows the proposed plan (HITL plan-review gate), then executes it — routing each task to a model by risk, letting tool-capable providers autonomously call the MCP tools, validating every change in the sandbox, and recording spend.
 
+**By default it opens a pull request**: the epic's tasks are gathered on a per-epic integration branch (`ai-os/epic-<id>`) and one PR is opened via the `gh` CLI. Pass `--merge-to-main` to merge directly instead. If there's no git remote or `gh`, PR mode falls back to a local merge so nothing is lost.
+
 ```bash
 ai-os epic run my-project --prompt "add JWT authentication" --language python
 # review the printed DAG, then approve at the prompt — or skip the gate:
 ai-os epic run my-project --prompt "add JWT authentication" --language python --yes
+# merge straight to main instead of opening a PR:
+ai-os epic run my-project --prompt "add JWT authentication" --language python --merge-to-main
 
 # Resume a crashed/interrupted epic — re-runs only the tasks that weren't
 # already COMPLETED (their merged work is kept). Get the epic id from
@@ -257,6 +261,124 @@ The most useful ones (see `.env.example` for the full list):
 | `AI_OS_MODEL_<PROVIDER>_<RISK>` | The specific model per provider per risk level. |
 | `AI_OS_EPIC_BUDGET_USD` | Optional hard cost cap per epic — remaining tasks are skipped once it's hit. |
 | `AI_OS_RATE_LIMIT_RETRIES` | How many times to back off on a 429 before falling back to the next provider. |
+
+---
+
+## 🌱 Database seed templates
+
+When a project's tests need a database, it declares one in a committed
+`.ai-os/sandbox.json` (see **[docs/SANDBOX_CONFIG.md](docs/SANDBOX_CONFIG.md)**).
+Validation then starts a **throwaway DB on a `--internal` Docker network** (no
+internet route), runs the project's migrations + a **reference-data seed**, then
+the tests — and destroys the whole DB afterwards. So you never write a cleanup
+step: every run (and every retry) starts from a fresh, freshly-seeded database.
+
+The migration + seed are **maintained in your own repo**. When a task changes
+the schema, the agent is instructed to update the migration and the seed too, so
+DB-backed tests keep passing. Below are two dummy templates to copy and adapt.
+
+### Template A — Prisma (Node / TypeScript)
+
+`.ai-os/sandbox.json`:
+
+```json
+{
+  "database": {
+    "image": "postgres:16",
+    "hostname": "db",
+    "env": { "POSTGRES_USER": "app", "POSTGRES_PASSWORD": "app", "POSTGRES_DB": "app" }
+  },
+  "env": { "DATABASE_URL": "postgres://app:app@db:5432/app" },
+  "setup_commands": [
+    "npx prisma migrate deploy",
+    "npx tsx prisma/seed-reference.ts"
+  ],
+  "test_command": "npm run test:unit"
+}
+```
+
+`prisma/schema.prisma` (dummy model):
+
+```prisma
+model Widget {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  createdAt DateTime @default(now())
+}
+```
+
+`prisma/seed-reference.ts` (dummy seed — prefer going through your real
+service/repository layer over raw SQL, so ids and side effects are realistic):
+
+```typescript
+import { PrismaClient } from "@prisma/client";
+
+const prisma = new PrismaClient();
+
+async function main() {
+  // Idempotent so a re-run (or a partially-applied prior run) is safe.
+  await prisma.widget.upsert({
+    where: { name: "reference-widget" },
+    update: {},
+    create: { name: "reference-widget" },
+  });
+  // ...add the reference rows your tests assume exist.
+}
+
+main()
+  .then(() => prisma.$disconnect())
+  .catch((e) => {
+    console.error(e);
+    prisma.$disconnect();
+    process.exit(1); // non-zero -> AI-OS reports a setup/seed failure
+  });
+```
+
+### Template B — Flyway (Java / Spring Boot)
+
+With Spring + Flyway, migrations (including a seed migration) run automatically
+when the Spring context loads during `mvn test`, so `setup_commands` can be
+empty — you just add the seed as a versioned migration.
+
+`.ai-os/sandbox.json`:
+
+```json
+{
+  "database": {
+    "image": "postgres:16",
+    "hostname": "db",
+    "env": { "POSTGRES_USER": "app", "POSTGRES_PASSWORD": "app", "POSTGRES_DB": "app" }
+  },
+  "env": {
+    "SPRING_DATASOURCE_URL": "jdbc:postgresql://db:5432/app",
+    "SPRING_DATASOURCE_USERNAME": "app",
+    "SPRING_DATASOURCE_PASSWORD": "app",
+    "SPRING_FLYWAY_ENABLED": "true"
+  }
+}
+```
+
+`src/main/resources/db/migration/V1__widgets.sql` (dummy schema):
+
+```sql
+CREATE TABLE widgets (
+    id   BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+```
+
+`src/main/resources/db/migration/V999__seed_reference_data.sql` (dummy seed — a
+high version so it applies after every real schema migration; idempotent):
+
+```sql
+INSERT INTO widgets (name) VALUES ('reference-widget')
+ON CONFLICT (name) DO NOTHING;
+-- ...add the reference rows your tests assume exist.
+```
+
+> Keep seed migrations in a version range you reserve for seeds (e.g. `V900+`)
+> so they never collide with real schema migrations, and always make them
+> idempotent (`ON CONFLICT DO NOTHING` / `MERGE`).
 
 ---
 

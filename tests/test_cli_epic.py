@@ -36,7 +36,7 @@ def _patch_common(monkeypatch, tmp_path, executed_flag):
     # writes to the real ~/.ai-os during tests.
     monkeypatch.setenv("AI_OS_HOME", str(tmp_path / "home"))
 
-    async def fake_decompose(prompt, engine, adapter, model=None):
+    async def fake_decompose(prompt, engine, adapter, model=None, conventions=""):
         return _PLAN
 
     monkeypatch.setattr(cli_module, "decompose", fake_decompose)

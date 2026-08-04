@@ -93,6 +93,18 @@ async def test_executor_rejects_path_traversal(tmp_path):
     assert not (tmp_path.parent.parent / "etc/evil.py").exists()
 
 
+async def test_executor_injects_project_conventions(tmp_path):
+    adapter = _CannedAdapter("<<<AI_OS_FILE: a.py>>>\nx=1\n<<<AI_OS_END>>>")
+    executor = build_completion_agent_turn_executor(adapter)
+    ctx = AgentTurnContext(
+        task=_task(), worktree_path=tmp_path, context_cache="ctx", attempt=1,
+        previous_validation_output=None, project_conventions="- All strings via i18n t('key')",
+    )
+    await executor(ctx)
+    assert "Project conventions" in adapter.requests[0].context_payload
+    assert "i18n t('key')" in adapter.requests[0].context_payload
+
+
 async def test_executor_includes_previous_output_on_retry(tmp_path):
     adapter = _CannedAdapter("<<<AI_OS_FILE: a.py>>>\nfixed=1\n<<<AI_OS_END>>>")
     executor = build_completion_agent_turn_executor(adapter)

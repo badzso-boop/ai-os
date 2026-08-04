@@ -229,6 +229,143 @@ async def test_budget_cap_skips_remaining_tasks(git_repo: Path, tmp_path: Path):
     await engine.dispose()
 
 
+async def test_merge_to_main_mode_no_integration_branch(git_repo: Path):
+    # create_pr=False -> tasks merge straight to main, no integration branch.
+    router = ProtocolRouter({"gemini": _FilePerTaskAdapter()})
+    scheduler = DynamicScheduler(router, environ={})
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=scheduler, adapters={"gemini": _FilePerTaskAdapter()},
+        language="python", sandbox_runner=_AlwaysPassSandbox(), create_pr=False,
+    )
+    result = await runner.run_epic([_task("A")])
+    assert result.completed == ["A"]
+    assert result.integration_branch is None
+    assert result.pull_request_url is None
+    assert (git_repo / "A.py").read_text() == "TASK_ID = 'A'"
+    # main is the checked-out branch and has the file
+    head = subprocess.run(["git", "branch", "--show-current"], cwd=git_repo, capture_output=True, text=True).stdout.strip()
+    assert head == "main"
+
+
+async def test_pr_mode_falls_back_to_local_merge_without_remote(git_repo: Path):
+    # PR mode (default) with no git remote -> integration branch + local merge.
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=DynamicScheduler(ProtocolRouter({"gemini": _FilePerTaskAdapter()}), environ={}),
+        adapters={"gemini": _FilePerTaskAdapter()}, language="python",
+        sandbox_runner=_AlwaysPassSandbox(),  # create_pr defaults True
+    )
+    result = await runner.run_epic([_task("A")])
+    assert result.completed == ["A"]
+    assert result.integration_branch and result.integration_branch.startswith("ai-os/epic-")
+    assert result.merged_to_main is True
+    assert result.pull_request_url is None
+    # fallback merged the integration branch into main
+    assert (git_repo / "A.py").read_text() == "TASK_ID = 'A'"
+
+
+async def test_pr_mode_opens_pr_when_remote_and_gh(git_repo: Path, tmp_path: Path, monkeypatch):
+    # Give the repo a (local bare) remote and pretend `gh` exists; stub the
+    # actual PR call so no real GitHub is hit — proving the PR path is taken.
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=git_repo, check=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=git_repo, check=True)
+
+    import ai_os.core.epic_runner as er
+    monkeypatch.setattr(er.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+
+    opened = {}
+
+    async def fake_open_pr(self, head, base, title, body):
+        opened["head"] = head
+        opened["base"] = base
+        return "https://github.com/acme/repo/pull/42"
+
+    monkeypatch.setattr(er.GitStagingEngine, "open_pull_request", fake_open_pr)
+
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=DynamicScheduler(ProtocolRouter({"gemini": _FilePerTaskAdapter()}), environ={}),
+        adapters={"gemini": _FilePerTaskAdapter()}, language="python",
+        sandbox_runner=_AlwaysPassSandbox(),
+    )
+    result = await runner.run_epic([_task("A")])
+    assert result.pull_request_url == "https://github.com/acme/repo/pull/42"
+    assert result.merged_to_main is False
+    assert opened["base"] == "main"
+    assert opened["head"] == result.integration_branch
+    # the integration branch was really pushed to the bare remote
+    branches = subprocess.run(["git", "branch", "-a"], cwd=bare, capture_output=True, text=True).stdout
+    assert result.integration_branch in branches
+
+
+async def test_on_event_emits_observability_events(git_repo: Path):
+    events: list[dict] = []
+    router = ProtocolRouter({"gemini": _FilePerTaskAdapter()})
+    scheduler = DynamicScheduler(router, environ={})
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=scheduler, adapters={"gemini": _FilePerTaskAdapter()},
+        language="python", sandbox_runner=_AlwaysPassSandbox(), create_pr=False,
+        on_event=lambda ev: events.append(ev),
+    )
+    await runner.run_epic([_task("A")])
+
+    types = [e["type"] for e in events]
+    assert "attempt" in types
+    assert "validation" in types
+    assert "merged" in types
+    # the validation event carries the sandbox outcome
+    val = next(e for e in events if e["type"] == "validation")
+    assert val["task_id"] == "A" and val["success"] is True and val["exit_code"] == 0
+
+
+async def test_on_event_reports_sandbox_failure_and_retry(git_repo: Path):
+    events: list[dict] = []
+    router = ProtocolRouter({"gemini": _FilePerTaskAdapter()})
+    scheduler = DynamicScheduler(router, environ={})
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=scheduler, adapters={"gemini": _FilePerTaskAdapter()},
+        language="python", sandbox_runner=_AlwaysFailSandbox(), create_pr=False,
+        on_event=lambda ev: events.append(ev),
+    )
+    # default max_retries=3 -> 4 attempts, all fail
+    await runner.run_epic([_task("A")])
+
+    failed = [e for e in events if e["type"] == "validation" and not e["success"]]
+    assert failed, "expected failing validation events"
+    assert "boom" in failed[0]["output"]  # the sandbox output is surfaced
+    assert any(e["type"] == "retry" for e in events)  # retries were reported
+
+
+def test_pr_body_includes_dag_table():
+    from ai_os.core.scheduler import Assignment
+    from ai_os.core.epic_runner import EpicRunResult
+
+    runner = EpicRunner(
+        repo_root="/tmp", scheduler=DynamicScheduler(ProtocolRouter({"gemini": _FilePerTaskAdapter()}), environ={}),
+        adapters={"gemini": _FilePerTaskAdapter()}, language="python",
+    )
+    result = EpicRunResult()
+    result.raw_prompt = "add a landing page"
+    result.completed = ["A", "B"]
+    result.blocked = ["C"]
+    result.assignments = {
+        "A": Assignment("anthropic", "sonnet"),
+        "B": Assignment("gemini", None),
+        "C": Assignment("anthropic", "opus"),
+    }
+    tasks = [_task("A"), _task("B", deps=["A"]), _task("C", deps=["B"])]
+
+    title, body = runner._build_pr_content(result, tasks)
+    assert title == "AI-OS: add a landing page"
+    # the DAG table + each task row + routing + outcome
+    assert "| Task | Title | Risk | Routed to | Depends on | Result |" in body
+    assert "anthropic → sonnet" in body
+    assert "gemini → default" in body  # model=None -> "default"
+    assert "✅ merged" in body and "⛔ blocked" in body
+    assert "| B | B | LOW | gemini → default | A |" in body
+    assert "> add a landing page" in body
+
+
 async def test_resume_epic_reruns_only_incomplete_tasks(git_repo: Path, tmp_path: Path):
     from ai_os.core.persistence import Persistence
 

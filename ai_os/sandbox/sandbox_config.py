@@ -57,6 +57,10 @@ class SandboxConfig:
     env: dict[str, str] = field(default_factory=dict)
     setup_commands: tuple[str, ...] = ()
     test_command: str | None = None
+    # Override the language profile's base image — e.g. point at a Playwright
+    # image (`mcr.microsoft.com/playwright:...`) so `setup_commands` can install
+    # browsers and `test_command` can run e2e tests. `None` = the profile default.
+    image: str | None = None
 
     @property
     def needs_database(self) -> bool:
@@ -106,11 +110,16 @@ def parse_sandbox_config(data: object) -> SandboxConfig:
     if test_command is not None and not isinstance(test_command, str):
         raise SandboxConfigError("'test_command' must be a string")
 
+    image = data.get("image")
+    if image is not None and not isinstance(image, str):
+        raise SandboxConfigError("'image' must be a string")
+
     return SandboxConfig(
         database=database,
         env=_as_str_map(data.get("env"), "env"),
         setup_commands=tuple(setup),
         test_command=test_command,
+        image=image,
     )
 
 

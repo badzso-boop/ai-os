@@ -32,6 +32,23 @@ at test time.
 | `env` | Env injected into the **setup + test** containers — e.g. the connection string. |
 | `setup_commands` | Commands run (DB reachable, internet not) before the tests: migrations + your reference-data seed. |
 | `test_command` | Overrides the language default test command (optional). |
+| `image` | Overrides the language profile's base image (optional) — e.g. point at a Playwright image so `setup_commands` can install browsers and `test_command` can run e2e tests. |
+
+## Project conventions (`.ai-os/conventions.md`)
+
+Separately from the sandbox, a project can commit a **`.ai-os/conventions.md`**
+with project-level rules for the AI agents (provider-agnostic — reaches
+Gemini/OpenRouter tasks too, not just the `claude` CLI). AI-OS injects it into
+**both** the epic planner's decomposition (so the DAG respects the rules — e.g.
+adds an i18n task) **and every task's prompt** (so each task follows them):
+
+```markdown
+# Project conventions for AI-OS agents
+- All user-facing strings MUST go through the i18n system (`t('key')`), never
+  hardcoded. Default language is Hungarian; add English translations.
+- UI primitives are Base UI (`@base-ui/react`), NOT shadcn/Radix — compose a
+  Button-as-link with `render={<Link/>}` + `nativeButton={false}`.
+```
 
 `setup_commands` / `test_command` run in the language's dependency image, so use
 tooling available there (Python image → `python`/`pip` deps; Node → `npm`/`npx`
@@ -76,9 +93,11 @@ reference rows.
 }
 ```
 
-> Caveat: the Node profile currently uses `npm` and an out-of-tree
-> `node_modules` (via `NODE_PATH`). That is fragile for bundler-based runners
-> (Vite/Vitest/Next) and does not cover `pnpm` — both are flagged follow-ups.
+> Node uses **copy-isolation**: the code + `node_modules` are baked into one
+> per-task image (no bind mount), so Vite/Vitest/Next resolve `node_modules`
+> normally. The package manager (**pnpm** / yarn / npm) is auto-detected from the
+> lockfile; the default test command is `<pm> test`, overridable with
+> `test_command`.
 
 ### Java / Spring Boot (Postgres)
 

@@ -43,11 +43,19 @@ import asyncio
 import hashlib
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ai_os.sandbox.db_services import DatabaseSandbox, DatabaseSandboxError
 from ai_os.sandbox.log_parser import build_feedback
+from ai_os.sandbox.node_toolchain import (
+    NODE_LANGUAGES,
+    NODE_MANIFESTS,
+    build_copy_dockerfile,
+    detect_node_package_manager,
+    node_install_command,
+    node_test_command,
+)
 from ai_os.sandbox.sandbox_config import SandboxConfigError, load_sandbox_config
 
 
@@ -90,6 +98,15 @@ class SandboxProfile:
     dependency_manifests: tuple[str, ...] = ()
     install_command: str | None = None
     run_env: tuple[tuple[str, str], ...] = ()  # extra -e VAR=VALUE for phase 2
+    # Isolation strategy for the validation run:
+    #   "mount" (default) — bind-mount the worktree read-only at /app and run
+    #     against a base/dependency image (deps live outside the tree: Python
+    #     site-packages, Java .m2). Fast, no code copy.
+    #   "copy" — COPY the code AND install deps into one per-task image, run with
+    #     NO bind mount. Needed for Node, whose bundler-based test runners
+    #     (Vite/Vitest/Next) resolve node_modules from the tree and ignore the
+    #     out-of-tree trick. See `node_toolchain.py`.
+    isolation: str = "mount"
 
 
 # Doc 10 §2's language profile matrix, extended to javascript alongside
@@ -107,15 +124,6 @@ class SandboxProfile:
 # installed in a network-enabled per-task image build (phase 1), then the tests
 # run against that image with --network none (phase 2). See
 # `dependency_manifest`/`install_command` below and `_ensure_dependency_image`.
-# Node's out-of-tree dependency directory (phase 1 installs here; phase 2 points
-# NODE_PATH + PATH at it, since the worktree is a read-only mount and can't hold
-# a node_modules of its own).
-_NODE_DEPS = "/deps/node_modules"
-_NODE_ENV: tuple[tuple[str, str], ...] = (
-    ("NODE_PATH", _NODE_DEPS),
-    ("PATH", f"{_NODE_DEPS}/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
-)
-
 SANDBOX_PROFILES: dict[str, SandboxProfile] = {
     "python": SandboxProfile(
         image="ai-os-sandbox-python:3.12",
@@ -129,21 +137,21 @@ SANDBOX_PROFILES: dict[str, SandboxProfile] = {
         dependency_manifests=("requirements.txt",),
         install_command="pip install --no-cache-dir -r requirements.txt",
     ),
-    # Node: phase 1 installs into /deps (WORKDIR), phase 2 finds it via NODE_PATH
-    # + PATH. `npm install` (not `ci`) so a project without a lockfile still works.
+    # Node: copy-isolation (code + node_modules in one image, no bind mount) so
+    # Vite/Vitest/Next resolve node_modules normally; package manager (pnpm/yarn/
+    # npm) auto-detected from the lockfile via corepack. The default test command
+    # is `<pm> test` (see node_toolchain), overridable via .ai-os/sandbox.json.
     "javascript": SandboxProfile(
-        image="node:20-alpine",
+        image="node:22-alpine",
         command="npm test",
-        dependency_manifests=("package.json", "package-lock.json"),
-        install_command="npm install",
-        run_env=_NODE_ENV,
+        dependency_manifests=NODE_MANIFESTS,
+        isolation="copy",
     ),
     "typescript": SandboxProfile(
-        image="node:20-alpine",
-        command="npx tsc --noEmit && npm test",
-        dependency_manifests=("package.json", "package-lock.json"),
-        install_command="npm install",
-        run_env=_NODE_ENV,
+        image="node:22-alpine",
+        command="npm test",
+        dependency_manifests=NODE_MANIFESTS,
+        isolation="copy",
     ),
     # Java: phase 1 pre-fetches deps into a fixed, world-readable local repo
     # (`-Dmaven.repo.local=/deps/.m2`) via `dependency:go-offline`; phase 2 runs
@@ -171,6 +179,7 @@ def build_docker_argv(
     network: str = "none",
     extra_env: tuple[tuple[str, str], ...] = (),
     command: str | None = None,
+    mount: bool = True,
 ) -> list[str]:
     """Build the hardened `docker run ...` argv for one validation run.
 
@@ -190,6 +199,8 @@ def build_docker_argv(
       env + the DB connection).
     - `command` overrides `profile.command` (used for the setup/seed phase and a
       project's `test_command` override).
+    - `mount=False` omits the read-only worktree bind mount — for copy-isolation
+      runs where the code is already baked into `image` (see `isolation="copy"`).
     """
     argv = [
         docker_cli,
@@ -197,8 +208,10 @@ def build_docker_argv(
         "--rm",
         "--name",
         container_name,
-        "-v",
-        f"{Path(worktree_path).resolve()}:/app:ro",
+    ]
+    if mount:
+        argv += ["-v", f"{Path(worktree_path).resolve()}:/app:ro"]
+    argv += [
         "--workdir",
         "/app",
         "--network",
@@ -273,18 +286,6 @@ class EphemeralSandboxRunner:
                 f"Supported: {sorted(SANDBOX_PROFILES)}"
             )
 
-        # Two-phase (phase 1): if the profile declares dependency handling and
-        # the worktree ships a non-empty manifest, bake a per-task image WITH
-        # network that installs those deps, then validate against it below with
-        # --network none. A failed install is reported as a validation failure
-        # (so the agent can fix its manifest), not a crash.
-        image, build_failure = await self._resolve_image(profile, Path(worktree_path))
-        if build_failure is not None:
-            return build_failure
-
-        # Optional repo-side config (.ai-os/sandbox.json): a declared database
-        # switches this from a single `--network none` container to a DB-backed
-        # flow on an isolated `--internal` network (setup/seed then tests).
         try:
             config = load_sandbox_config(Path(worktree_path))
         except SandboxConfigError as exc:
@@ -293,14 +294,52 @@ class EphemeralSandboxRunner:
             )
             return ValidationResult(False, 1, "Invalid .ai-os/sandbox.json.", feedback["output"])
 
-        if config is not None and config.needs_database:
-            return await self._run_with_database(worktree_path, profile, image, config)
-        return await self._run_isolated(worktree_path, profile, image, config)
+        # A project can override the base image (e.g. a Playwright image for e2e).
+        if config is not None and config.image:
+            profile = replace(profile, image=config.image)
+
+        worktree = Path(worktree_path)
+        if profile.isolation == "copy":
+            # Copy-isolation (Node): build one image with the code + deps baked
+            # in, run with NO bind mount so bundler-based runners resolve
+            # node_modules from the tree. The default test command is the
+            # detected package manager's `<pm> test`.
+            image, build_failure = await self._build_copy_image(profile, worktree, language)
+            if build_failure is not None:
+                return build_failure
+            mount = False
+            default_command = self._copy_default_command(worktree, language)
+        else:
+            # Two-phase (phase 1): bake a per-task dependency image WITH network,
+            # then validate against it network-free (bind-mounting the worktree).
+            image, build_failure = await self._resolve_image(profile, worktree)
+            if build_failure is not None:
+                return build_failure
+            mount = True
+            default_command = None  # -> profile.command
+
+        try:
+            if config is not None and config.needs_database:
+                return await self._run_with_database(
+                    worktree, profile, image, config, mount=mount, default_command=default_command
+                )
+            return await self._run_isolated(
+                worktree, profile, image, config, mount=mount, default_command=default_command
+            )
+        finally:
+            if profile.isolation == "copy":
+                await self._best_effort_rmi(image)
+
+    def _copy_default_command(self, worktree: Path, language: str) -> str | None:
+        if language in NODE_LANGUAGES:
+            return node_test_command(detect_node_package_manager(worktree))
+        return None
 
     # -- run phases ----------------------------------------------------------
 
     async def _run_isolated(
-        self, worktree_path: Path, profile: SandboxProfile, image: str, config
+        self, worktree_path: Path, profile: SandboxProfile, image: str, config,
+        *, mount: bool, default_command: str | None,
     ) -> ValidationResult:
         """The default flow: a fully network-isolated (`--network none`)
         container. Honors an optional (DB-less) `.ai-os/sandbox.json`'s env,
@@ -310,18 +349,19 @@ class EphemeralSandboxRunner:
             setup = await self._run_phase(
                 worktree_path, profile, image, network="none", extra_env=extra_env,
                 command=" && ".join(config.setup_commands),
-                timeout=self.build_timeout_seconds, name_prefix="ai-os-setup",
+                timeout=self.build_timeout_seconds, name_prefix="ai-os-setup", mount=mount,
             )
             if not setup.success:
                 return _as_setup_failure(setup)
-        command = config.test_command if config is not None else None
+        command = (config.test_command if config is not None and config.test_command else default_command)
         return await self._run_phase(
             worktree_path, profile, image, network="none", extra_env=extra_env,
-            command=command, timeout=self.timeout_seconds,
+            command=command, timeout=self.timeout_seconds, mount=mount,
         )
 
     async def _run_with_database(
-        self, worktree_path: Path, profile: SandboxProfile, image: str, config
+        self, worktree_path: Path, profile: SandboxProfile, image: str, config,
+        *, mount: bool, default_command: str | None,
     ) -> ValidationResult:
         """DB-backed flow: bring up a Postgres (or other) sidecar on a fresh
         `--internal` network (no internet), run the setup/seed commands, then the
@@ -341,13 +381,14 @@ class EphemeralSandboxRunner:
                 setup = await self._run_phase(
                     worktree_path, profile, image, network=running.network, extra_env=extra_env,
                     command=" && ".join(config.setup_commands),
-                    timeout=self.build_timeout_seconds, name_prefix="ai-os-setup",
+                    timeout=self.build_timeout_seconds, name_prefix="ai-os-setup", mount=mount,
                 )
                 if not setup.success:
                     return _as_setup_failure(setup)
+            command = config.test_command if config.test_command else default_command
             return await self._run_phase(
                 worktree_path, profile, image, network=running.network, extra_env=extra_env,
-                command=config.test_command, timeout=self.timeout_seconds,
+                command=command, timeout=self.timeout_seconds, mount=mount,
             )
         finally:
             await db_sandbox.teardown(running)
@@ -355,12 +396,12 @@ class EphemeralSandboxRunner:
     async def _run_phase(
         self, worktree_path: Path, profile: SandboxProfile, image: str, *,
         network: str, extra_env: tuple[tuple[str, str], ...], command: str | None,
-        timeout: float, name_prefix: str = "ai-os-sandbox",
+        timeout: float, name_prefix: str = "ai-os-sandbox", mount: bool = True,
     ) -> ValidationResult:
         container_name = f"{name_prefix}-{uuid.uuid4().hex[:12]}"
         argv = build_docker_argv(
             self.docker_cli, worktree_path, container_name, profile,
-            image=image, network=network, extra_env=extra_env, command=command,
+            image=image, network=network, extra_env=extra_env, command=command, mount=mount,
         )
         return await self._run_container(argv, container_name, timeout)
 
@@ -536,3 +577,67 @@ class EphemeralSandboxRunner:
         )
         await proc.wait()
         return proc.returncode == 0
+
+    # -- copy-isolation image (Node) -----------------------------------------
+
+    async def _build_copy_image(
+        self, profile: SandboxProfile, worktree_path: Path, language: str
+    ) -> tuple[str, ValidationResult | None]:
+        """Build a per-task image with the worktree code + installed deps baked
+        in (deps layer cached across attempts; code layer changes each run). The
+        Docker build context IS the worktree (so `COPY . ./` picks up the code);
+        network is on for the install. A failed install/build comes back as a
+        validation failure with the build log, not a crash. The image is tagged
+        uniquely (the code changes each run) and cleaned up by the caller."""
+        worktree = Path(worktree_path).resolve()
+        present = [m for m in profile.dependency_manifests if (worktree / m).is_file()]
+        if language in NODE_LANGUAGES:
+            install = node_install_command(detect_node_package_manager(worktree))
+        else:
+            install = profile.install_command or "true"
+        dockerfile = build_copy_dockerfile(profile.image, present, install)
+        tag = f"ai-os-sandbox-copy:{uuid.uuid4().hex[:16]}"
+
+        with tempfile.TemporaryDirectory(prefix="ai-os-copybuild-") as tmp_dir:
+            dockerfile_path = Path(tmp_dir) / "Dockerfile"
+            dockerfile_path.write_text(dockerfile, encoding="utf-8")
+            proc = await asyncio.create_subprocess_exec(
+                self.docker_cli, "build", "-t", tag, "-f", str(dockerfile_path), str(worktree),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                out, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.build_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                feedback = build_feedback(
+                    success=False, exit_code=124,
+                    raw_output=f"Dependency install/build timed out after {self.build_timeout_seconds}s.",
+                )
+                return profile.image, ValidationResult(
+                    False, 124, "Dependency install/build timed out.", feedback["output"]
+                )
+            if proc.returncode != 0:
+                feedback = build_feedback(
+                    success=False, exit_code=proc.returncode or 1,
+                    raw_output="Dependency install failed while building the sandbox image:\n"
+                    + out.decode(errors="replace"),
+                )
+                return profile.image, ValidationResult(
+                    False, proc.returncode or 1, "Dependency install failed.", feedback["output"]
+                )
+        return tag, None
+
+    async def _best_effort_rmi(self, tag: str) -> None:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.docker_cli, "rmi", "-f", tag,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=30.0)
+        except Exception:
+            pass  # cached layers persist for reuse; the thin top image ref is best-effort

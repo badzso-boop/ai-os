@@ -105,8 +105,13 @@ class GitStagingEngine:
     fast-forward-merges into the base branch and tears the worktree down.
     """
 
-    def __init__(self, repo_root: Path) -> None:
+    def __init__(self, repo_root: Path, base_branch: str = "main") -> None:
         self.repo_root = Path(repo_root)
+        # The branch tasks rebase onto and merge into. Normally "main"; an
+        # `EpicRunner` in PR mode points this at a per-epic integration branch
+        # so tasks accumulate there and one PR is opened at the end instead of
+        # merging straight to main. Mutable so the runner can set it per run.
+        self.base_branch = base_branch
         self.worktrees_dir = self.repo_root / ".ai-os" / "worktrees"
         # Serializes merges into base_branch: only one task's commit/rebase/
         # merge sequence touches the shared base branch at a time.
@@ -138,7 +143,7 @@ class GitStagingEngine:
     def _worktree_path(self, task_id: str) -> Path:
         return self.worktrees_dir / task_id
 
-    async def create_worktree(self, task_id: str, base_branch: str = "main") -> Path:
+    async def create_worktree(self, task_id: str, base_branch: str | None = None) -> Path:
         """Create (or destroy-and-recreate) the worktree for `task_id`.
 
         Idempotent / crash-recovery-safe: calling this twice for the same
@@ -146,6 +151,7 @@ class GitStagingEngine:
         leftover worktree/branch first, so it always succeeds rather than
         failing on "path already exists" / "branch already exists".
         """
+        base_branch = base_branch or self.base_branch
         branch = self._branch_name(task_id)
         wt_path = self._worktree_path(task_id)
         async with self._worktree_admin_lock:
@@ -199,9 +205,9 @@ class GitStagingEngine:
             if status_out.strip():
                 await self._run_git(["commit", "-m", commit_message], wt_path)
 
-            # 2. Rebase onto main to pick up any prior task's merge.
+            # 2. Rebase onto the base branch to pick up any prior task's merge.
             rc, _, _ = await self._run_git(
-                ["rebase", "main"], wt_path, check=False
+                ["rebase", self.base_branch], wt_path, check=False
             )
             if rc != 0:
                 await self._run_git(
@@ -219,12 +225,12 @@ class GitStagingEngine:
             if not is_valid:
                 return False
 
-            # 4. Fast-forward-only merge into main. See module docstring
-            #    for why this checks out main in repo_root directly (fine
-            #    for a disposable test repo; TODO for production: `git
-            #    fetch <wt_path> <branch>:main` instead, to avoid touching
-            #    repo_root's checked-out branch).
-            await self._run_git(["checkout", "main"], self.repo_root)
+            # 4. Fast-forward-only merge into the base branch. See module
+            #    docstring for why this checks out the base branch in repo_root
+            #    directly (fine for a disposable/scratch repo). In PR mode the
+            #    base branch is a per-epic integration branch, so this
+            #    accumulates the tasks there rather than on main.
+            await self._run_git(["checkout", self.base_branch], self.repo_root)
             await self._run_git(["merge", "--ff-only", branch], self.repo_root)
 
             # Cleanup only on this success path — a rebase/validation
@@ -251,3 +257,43 @@ class GitStagingEngine:
         worktree.
         """
         await self.cleanup_worktree(task_id)
+
+    # -- integration branch + PR / merge finalize (Phase 5 follow-up) --------
+
+    async def create_integration_branch(self, branch: str, from_ref: str | None = None) -> None:
+        """Create (or reset) an integration branch off `from_ref` and check it
+        out in `repo_root`, so subsequent per-task worktrees branch from it and
+        their merges accumulate on it. Used by PR mode to gather a whole epic's
+        work on one branch before opening a single PR."""
+        base = from_ref or self.base_branch
+        await self._run_git(["checkout", "-B", branch, base], self.repo_root)
+
+    async def has_remote(self, remote: str = "origin") -> bool:
+        rc, _, _ = await self._run_git(["remote", "get-url", remote], self.repo_root, check=False)
+        return rc == 0
+
+    async def push_branch(self, branch: str, remote: str = "origin") -> None:
+        await self._run_git(["push", "-u", remote, branch], self.repo_root)
+
+    async def merge_branch_ff(self, source: str, target: str = "main") -> None:
+        """Fast-forward-only merge `source` into `target` (the `--merge-to-main`
+        finalize path)."""
+        await self._run_git(["checkout", target], self.repo_root)
+        await self._run_git(["merge", "--ff-only", source], self.repo_root)
+
+    async def open_pull_request(self, head: str, base: str, title: str, body: str) -> str:
+        """Open a PR via the `gh` CLI (`head` -> `base`) and return its URL.
+        Assumes `head` is already pushed and `gh` is authenticated; raises
+        `GitCommandError` on failure so the caller can fall back to a merge."""
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "pr", "create",
+            "--base", base, "--head", head, "--title", title, "--body", body,
+            cwd=str(self.repo_root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        assert proc.returncode is not None
+        if proc.returncode != 0:
+            raise GitCommandError(["gh", "pr", "create"], proc.returncode, stderr.decode())
+        return stdout.decode().strip()

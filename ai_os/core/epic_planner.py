@@ -82,7 +82,9 @@ def build_repo_summary(engine: KnowledgeEngine, max_symbols: int = 200) -> str:
     return "\n".join(lines)
 
 
-def build_planning_prompt(user_prompt: str, repo_summary: str, parse_feedback: str | None = None) -> str:
+def build_planning_prompt(
+    user_prompt: str, repo_summary: str, parse_feedback: str | None = None, conventions: str = ""
+) -> str:
     parts = [
         "# High-level request",
         user_prompt,
@@ -90,6 +92,14 @@ def build_planning_prompt(user_prompt: str, repo_summary: str, parse_feedback: s
         "# Repository structure (ground your task paths in these real files)",
         repo_summary,
     ]
+    if conventions.strip():
+        parts += [
+            "",
+            "# Project conventions (factor these into the plan)",
+            "The project defined these rules; decompose so the DAG respects them "
+            "(e.g. add a dedicated task if a convention like i18n/translation needs one):",
+            conventions.strip(),
+        ]
     if parse_feedback:
         parts += [
             "",
@@ -156,6 +166,7 @@ async def decompose(
     adapter: BaseMCPAdapter,
     model: str | None = None,
     max_parse_retries: int = 1,
+    conventions: str = "",
 ) -> list[TaskNode]:
     """Decompose `user_prompt` into a validated `list[TaskNode]` using `adapter`.
 
@@ -171,7 +182,7 @@ async def decompose(
         request = LLMTaskRequest(
             task_id="epic-plan",
             system_prompt=PLANNING_SYSTEM_PROMPT,
-            context_payload=build_planning_prompt(user_prompt, repo_summary, feedback),
+            context_payload=build_planning_prompt(user_prompt, repo_summary, feedback, conventions),
             model=model,
         )
         response = await adapter.execute_task(request)
