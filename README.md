@@ -83,7 +83,8 @@ AI-OS is organized into four main layers plus an observability surface:
 - **Knowledge graph & cache**: `networkx`, in-process polling file-watcher
 - **Model protocol**: MCP (Model Context Protocol) client + server (`mcp` SDK) plus native function-calling adapters (Anthropic, Gemini, OpenRouter)
 - **Persistence**: async SQLAlchemy 2.0 + SQLite (`aiosqlite`)
-- **Execution sandbox**: Git worktrees + ephemeral, hardened Docker containers
+- **Execution sandbox**: Git worktrees + ephemeral, hardened Docker containers (pnpm/yarn/npm, Maven, pip; optional Postgres sidecar on an `--internal` network)
+- **Integration**: opens PRs via the `gh` CLI (with the DAG in the description)
 
 ---
 
@@ -102,6 +103,14 @@ The first four phases of the planned architecture are **implemented, tested, and
 | **4b** | Glass Box UI (React) & full 3-stage HITL web flow | ⛔ not built |
 
 The system works **end-to-end from the command line today**: give it a high-level request, it decomposes the work into a task DAG, routes each task to a model by risk, lets the model autonomously call tools to edit code, validates every change in a sandbox, and **opens a pull request** (or merges to `main` with `--merge-to-main`) — recording token/USD spend along the way. See `CLAUDE.md` for the per-phase "how it actually works" detail and the documented trade-offs/limitations.
+
+**Notable capabilities beyond the phase table:**
+- **Pull requests by default** — an epic's tasks gather on a `ai-os/epic-<id>` integration branch and one PR is opened via `gh`, its description containing the decomposed DAG (task → title → risk → routed model → deps → outcome).
+- **Sandbox that installs real dependencies** — a two-phase flow installs a project's deps (Python `pip`, Node `pnpm`/`yarn`/`npm` auto-detected, Java `mvn`) with network, then runs the tests network-free; an optional **Postgres sidecar** on a `--internal` network handles DB-backed tests without ever exposing the internet.
+- **Project conventions** — a committed `.ai-os/conventions.md` (i18n rules, UI-library gotchas, …) is injected into both the plan and every task's prompt, provider-agnostically.
+- **Live observability** — the CLI streams what each task is doing (attempt, routed model + tokens, sandbox pass/fail with output, retries, merges); `-v` shows full logs.
+- **Resilience & cost control** — a usage/rate-limit blocks just that task (the PR still finalizes the completed ones), a cheap model summarizes large failure logs before the expensive one retries, adaptive 429 backoff + provider fallback, and an optional per-epic USD cap.
+- **Crash resume** — `ai-os epic resume` re-runs only the not-yet-completed tasks of a crashed epic.
 
 ---
 
@@ -133,7 +142,7 @@ cp .env.example .env
 
 > `.env` is gitignored — never commit real credentials. Every value is optional; only providers with real credentials present get configured.
 
-> **Project dependencies in the sandbox.** Validation is a two-phase flow: a project's third-party dependencies are installed in a network-enabled per-task image build, then the tests run against it with `--network none` (so the agent's own code never gets network). This works for **Python** (`requirements.txt`), **Node** (`package.json`), and **Java** (`pom.xml`) — the project just needs to declare its deps in the standard manifest, and the agent is instructed to add any new dependency it introduces.
+> **Project dependencies in the sandbox.** Validation is a two-phase flow: a project's third-party dependencies are installed in a network-enabled per-task image build, then the tests run against it with `--network none` (so the agent's own code never gets network). This works for **Python** (`requirements.txt`), **Node** (`package.json` — **pnpm / yarn / npm auto-detected** from the lockfile, with the code + `node_modules` baked into one image so Vite/Vitest/Next resolve normally), and **Java** (`pom.xml`). The agent is instructed to add any new dependency it introduces to the manifest. Projects can override the base image (e.g. a Playwright image for e2e) via `.ai-os/sandbox.json`.
 
 > **Database-backed tests.** A project whose tests need a real database declares it in a committed `.ai-os/sandbox.json` (a DB service + migration/seed commands + the connection env). Validation then starts a throwaway DB sidecar on a Docker `--internal` network (reachable by the tests, but with **no route to the internet** — so isolation holds), runs the project's reference-data seed, then the tests. See **[docs/SANDBOX_CONFIG.md](docs/SANDBOX_CONFIG.md)** for the format and Python/Node/Java examples.
 
@@ -232,12 +241,30 @@ ai-os epic run my-project --prompt "add JWT authentication" --language python
 ai-os epic run my-project --prompt "add JWT authentication" --language python --yes
 # merge straight to main instead of opening a PR:
 ai-os epic run my-project --prompt "add JWT authentication" --language python --merge-to-main
+# -v / --verbose: show the FULL sandbox output on a failure (default: just the tail)
+ai-os epic run my-project --prompt "add JWT authentication" --language python -v
 
 # Resume a crashed/interrupted epic — re-runs only the tasks that weren't
 # already COMPLETED (their merged work is kept). Get the epic id from
 # `ai-os epic history`.
 ai-os epic resume my-project --epic <epic-id> --language python
 ```
+
+The run streams live what each task is doing, so it isn't a black box:
+
+```
+▶ TASK-4 attempt 1/2 — Serve landing page at root  → apps/web/src/app/page.tsx
+  TASK-4 · agent: anthropic→sonnet · 4200in/1100out tok
+  ✗ TASK-4 sandbox FAILED (exit 2) — tsc failed
+  ╭── TASK-4 sandbox output (tail) ──╮
+  │ src/app/page.tsx(12,5): error … │
+  ╰──────────────────────────────────╯
+  ↻ TASK-4 retrying (attempt 2)
+  ✓ TASK-4 sandbox passed (exit 0)
+  ✓ TASK-4 merged
+```
+
+**Project conventions.** Drop a committed `.ai-os/conventions.md` in your repo (i18n rules, UI-library gotchas, "prefer the service layer over raw SQL", …) and AI-OS injects it into both the decomposition (so the DAG respects it — e.g. adds a translation task) and every task's prompt — provider-agnostic, unlike a `CLAUDE.md` only the `claude` CLI auto-loads.
 
 ### G. Read back accounting
 
