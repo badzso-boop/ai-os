@@ -397,7 +397,10 @@ COMPLETION_SYSTEM_PROMPT = (
     "Rules: paths are POSIX, relative to the repo root, no leading './'; the "
     "SEARCH text must match the file's current content EXACTLY (whitespace and "
     "indentation included) and uniquely; do not wrap blocks in markdown code "
-    "fences; write no prose outside the blocks."
+    "fences; write no prose outside the blocks. If you introduce a new "
+    "third-party dependency, also update the project's dependency manifest "
+    "(requirements.txt / package.json / pom.xml) in a block — the sandbox "
+    "installs those before running the tests."
 )
 
 
@@ -578,7 +581,11 @@ TOOL_CALLING_SYSTEM_PROMPT = (
     "Workflow: make your edits with propose_file_patch, then call "
     "trigger_sandbox_validation to confirm they pass. If validation fails, read "
     "the output, fix the code, and validate again. When validation passes, stop "
-    "and briefly summarize what you changed."
+    "and briefly summarize what you changed.\n"
+    "IMPORTANT: if your change introduces a new third-party dependency, add it to "
+    "the project's dependency manifest (requirements.txt for Python, package.json "
+    "for Node, pom.xml for Java) — the sandbox installs those before running the "
+    "tests, so an unlisted dependency will make validation fail."
 )
 
 

@@ -12,12 +12,10 @@
 # Build once:
 #   docker build -t ai-os-sandbox-python:3.12 -f docker/python-sandbox.Dockerfile .
 #
-# Known limitation (not fixed by this image): a project's OWN third-party
-# dependencies (anything in its requirements.txt beyond pytest) still can't
-# be installed inside a --network-none run for the same reason. Projects
-# whose tests only need the standard library + pytest work today; genuine
-# per-project dependency installation would need a separate "build an image
-# for this task, then validate network-free" two-phase flow, which isn't
-# built yet - flagged in CLAUDE.md as a known gap, not silently ignored.
+# A project's OWN third-party dependencies (its requirements.txt) ARE now
+# handled: `container_runner.py`'s two-phase flow builds a per-task image FROM
+# this base that pip-installs requirements.txt WITH network (phase 1), then runs
+# the tests against it with --network none (phase 2). So this base only needs
+# pytest baked in; the rest comes from the project's manifest at task time.
 FROM python:3.12-slim
 RUN pip install --no-cache-dir pytest

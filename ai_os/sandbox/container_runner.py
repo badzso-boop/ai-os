@@ -40,6 +40,8 @@ as the *container's* exit code).
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,7 +60,23 @@ class ValidationResult:
 @dataclass(frozen=True)
 class SandboxProfile:
     image: str
-    command: str  # shell command run inside the container, e.g. "npx tsc --noEmit && npm test"
+    command: str  # phase-2 (validation) shell command, e.g. "npx tsc --noEmit && npm test"
+    # Two-phase dependency handling (optional). If `install_command` is set and
+    # the worktree contains at least one non-empty `dependency_manifests` file, a
+    # per-task image is built WITH network that runs `install_command` (phase 1),
+    # and the network-isolated validation (phase 2) runs against that image — so a
+    # project's third-party deps install without ever giving the untrusted,
+    # agent-written TEST code network access. `install_command=None` (or no
+    # manifest present) = single-phase (the base image + `command`).
+    #
+    # Per ecosystem, deps must be discoverable from the read-only /app mount in
+    # phase 2: Python installs to the global site-packages (found anywhere);
+    # Java uses a fixed `-Dmaven.repo.local=/deps/.m2` (offline in phase 2);
+    # Node installs into /deps/node_modules and phase 2 sets NODE_PATH/PATH to it
+    # via `run_env`.
+    dependency_manifests: tuple[str, ...] = ()
+    install_command: str | None = None
+    run_env: tuple[tuple[str, str], ...] = ()  # extra -e VAR=VALUE for phase 2
 
 
 # Doc 10 §2's language profile matrix, extended to javascript alongside
@@ -67,43 +85,76 @@ class SandboxProfile:
 # logic), so the sandbox profile matrix mirrors that.
 #
 # Python note: since every validation run is --network none (doc 10's own
-# hardening requirement), a `pip install` *inside* the container can never
-# reach PyPI — vanilla python:3.12-slim has no pytest, so this profile would
-# always fail with "pytest: command not found" regardless of the project
-# being validated. "ai-os-sandbox-python:3.12" (docker/python-sandbox.Dockerfile,
+# hardening requirement), a `pip install` *inside* the validation container can
+# never reach PyPI. "ai-os-sandbox-python:3.12" (docker/python-sandbox.Dockerfile,
 # build once: `docker build -t ai-os-sandbox-python:3.12 -f
-# docker/python-sandbox.Dockerfile .`) bakes pytest in ahead of time, WITH
-# network access, so the actual validation run stays fully network-isolated.
-# A project's own third-party deps beyond pytest still can't install inside
-# the sandbox for the same reason — a known, flagged gap (see the
-# Dockerfile's own comment and CLAUDE.md), not silently fixed here.
+# docker/python-sandbox.Dockerfile .`) bakes pytest in ahead of time so the
+# validation run needs no network for pytest itself. A project's OWN third-party
+# deps (its requirements.txt) are handled by the TWO-PHASE flow: they're
+# installed in a network-enabled per-task image build (phase 1), then the tests
+# run against that image with --network none (phase 2). See
+# `dependency_manifest`/`install_command` below and `_ensure_dependency_image`.
+# Node's out-of-tree dependency directory (phase 1 installs here; phase 2 points
+# NODE_PATH + PATH at it, since the worktree is a read-only mount and can't hold
+# a node_modules of its own).
+_NODE_DEPS = "/deps/node_modules"
+_NODE_ENV: tuple[tuple[str, str], ...] = (
+    ("NODE_PATH", _NODE_DEPS),
+    ("PATH", f"{_NODE_DEPS}/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+)
+
 SANDBOX_PROFILES: dict[str, SandboxProfile] = {
     "python": SandboxProfile(
-        "ai-os-sandbox-python:3.12",
+        image="ai-os-sandbox-python:3.12",
         # `-p no:cacheprovider`: the worktree is mounted read-only, so
         # pytest's cache plugin can never write `.pytest_cache/` into it —
         # harmless but noisy `PytestCacheWarning`s on every single run.
         # Disabled outright rather than redirected to /tmp: the container is
         # single-shot and thrown away immediately after, so there is no
         # cache to actually reuse between runs anyway.
-        "pip install -q -r requirements.txt 2>/dev/null; pytest -p no:cacheprovider",
+        command="pytest -p no:cacheprovider",
+        dependency_manifests=("requirements.txt",),
+        install_command="pip install --no-cache-dir -r requirements.txt",
     ),
-    "javascript": SandboxProfile("node:20-alpine", "npm test"),
-    "typescript": SandboxProfile("node:20-alpine", "npx tsc --noEmit && npm test"),
-    # Java's profile config + hardened argv ARE covered by the automated suite
-    # (see tests/test_sandbox_profiles.py — deterministic, no container). A
-    # real end-to-end Maven container run is gated behind an opt-in env var
-    # (AI_OS_TEST_JAVA_SANDBOX=1) rather than run by default, because
-    # maven:3.9-eclipse-temurin-17-alpine is a much heavier image to pull than
-    # the others and this is a shared host (see module docstring / CLAUDE.md) —
-    # so the heavy pull happens only when explicitly requested, never on a
-    # routine `pytest`.
-    "java": SandboxProfile("maven:3.9-eclipse-temurin-17-alpine", "mvn test"),
+    # Node: phase 1 installs into /deps (WORKDIR), phase 2 finds it via NODE_PATH
+    # + PATH. `npm install` (not `ci`) so a project without a lockfile still works.
+    "javascript": SandboxProfile(
+        image="node:20-alpine",
+        command="npm test",
+        dependency_manifests=("package.json", "package-lock.json"),
+        install_command="npm install",
+        run_env=_NODE_ENV,
+    ),
+    "typescript": SandboxProfile(
+        image="node:20-alpine",
+        command="npx tsc --noEmit && npm test",
+        dependency_manifests=("package.json", "package-lock.json"),
+        install_command="npm install",
+        run_env=_NODE_ENV,
+    ),
+    # Java: phase 1 pre-fetches deps into a fixed, world-readable local repo
+    # (`-Dmaven.repo.local=/deps/.m2`) via `dependency:go-offline`; phase 2 runs
+    # tests offline (`-o`) against that same repo. `go-offline` is best-effort —
+    # it can miss a few plugin deps, in which case an offline `mvn test` reports
+    # them (the agent then sees the failure) — a known Maven quirk, not a bug here.
+    # The profile config + hardened argv are covered deterministically by
+    # tests/test_sandbox_profiles.py; a real Maven container run is opt-in via
+    # AI_OS_TEST_JAVA_SANDBOX=1 (heavy image, shared host).
+    "java": SandboxProfile(
+        image="maven:3.9-eclipse-temurin-17-alpine",
+        command="mvn -o -Dmaven.repo.local=/deps/.m2 test",
+        dependency_manifests=("pom.xml",),
+        install_command="mvn -B -Dmaven.repo.local=/deps/.m2 dependency:go-offline",
+    ),
 }
 
 
 def build_docker_argv(
-    docker_cli: str, worktree_path: Path, container_name: str, profile: SandboxProfile
+    docker_cli: str,
+    worktree_path: Path,
+    container_name: str,
+    profile: SandboxProfile,
+    image: str | None = None,
 ) -> list[str]:
     """Build the hardened `docker run ...` argv for one validation run.
 
@@ -112,8 +163,13 @@ def build_docker_argv(
     pulling a (possibly heavy, e.g. Maven/JDK) image or running a container on a
     shared host — the Java profile in particular is covered this way. The order
     and content here must stay in lockstep with doc 10 §1.1's hardening list.
+
+    `image` overrides `profile.image` (used to run against a per-task
+    dependency image built by the two-phase flow); `profile.run_env` is passed
+    through as `-e VAR=VALUE` (needed by the Node profile to point NODE_PATH/PATH
+    at the out-of-tree /deps/node_modules).
     """
-    return [
+    argv = [
         docker_cli,
         "run",
         "--rm",
@@ -132,11 +188,16 @@ def build_docker_argv(
         "--cap-drop=ALL",
         "--user",
         "1000:1000",
-        profile.image,
+    ]
+    for key, value in profile.run_env:
+        argv += ["-e", f"{key}={value}"]
+    argv += [
+        image or profile.image,
         "sh",
         "-c",
         profile.command,
     ]
+    return argv
 
 
 class SandboxLanguageNotSupportedError(ValueError):
@@ -158,9 +219,18 @@ class EphemeralSandboxRunner:
     Docker container, one per `run_validation` call.
     """
 
-    def __init__(self, timeout_seconds: float = 60.0, docker_cli: str = "docker") -> None:
+    def __init__(
+        self,
+        timeout_seconds: float = 60.0,
+        docker_cli: str = "docker",
+        build_timeout_seconds: float = 600.0,
+    ) -> None:
         self.timeout_seconds = timeout_seconds
         self.docker_cli = docker_cli
+        # Phase-1 dependency-image builds get a longer budget than a validation
+        # run: `pip install`/`npm install`/`mvn go-offline` can be slow the first
+        # time (they're cached by manifest hash afterwards).
+        self.build_timeout_seconds = build_timeout_seconds
 
     async def run_validation(self, worktree_path: Path, language: str) -> ValidationResult:
         """Run `language`'s configured build+test command against
@@ -181,8 +251,19 @@ class EphemeralSandboxRunner:
                 f"Supported: {sorted(SANDBOX_PROFILES)}"
             )
 
+        # Two-phase (phase 1): if the profile declares dependency handling and
+        # the worktree ships a non-empty manifest, bake a per-task image WITH
+        # network that installs those deps, then validate against it below with
+        # --network none. A failed install is reported as a validation failure
+        # (so the agent can fix its manifest), not a crash.
+        image, build_failure = await self._resolve_image(profile, Path(worktree_path))
+        if build_failure is not None:
+            return build_failure
+
         container_name = f"ai-os-sandbox-{uuid.uuid4().hex[:12]}"
-        argv = build_docker_argv(self.docker_cli, worktree_path, container_name, profile)
+        argv = build_docker_argv(
+            self.docker_cli, worktree_path, container_name, profile, image=image
+        )
 
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -265,3 +346,110 @@ class EphemeralSandboxRunner:
             # be slow/unreachable — either way, don't let cleanup failure
             # mask the timeout result we're about to return.
             pass
+
+    # -- two-phase dependency image (phase 1) --------------------------------
+
+    async def _resolve_image(
+        self, profile: SandboxProfile, worktree_path: Path
+    ) -> tuple[str, ValidationResult | None]:
+        """Decide which image the validation run should use. If the profile has
+        no two-phase config, or the worktree ships no non-empty dependency
+        manifest, returns the base image unchanged. Otherwise builds (or reuses)
+        a per-task dependency image and returns its tag. On a dependency-install
+        failure, returns `(base_image, ValidationResult(success=False, ...))` so
+        the caller reports it as a validation failure the agent can fix."""
+        if not profile.install_command:
+            return profile.image, None
+
+        present = [
+            name
+            for name in profile.dependency_manifests
+            if (worktree_path / name).is_file()
+            and (worktree_path / name).read_text(encoding="utf-8", errors="replace").strip()
+        ]
+        if not present:
+            return profile.image, None
+
+        return await self._ensure_dependency_image(profile, worktree_path, present)
+
+    async def _ensure_dependency_image(
+        self, profile: SandboxProfile, worktree_path: Path, manifests: list[str]
+    ) -> tuple[str, ValidationResult | None]:
+        """Build (or reuse, cached by a hash of base image + install command +
+        manifest bytes) a per-task image that installs `manifests` WITH network,
+        so the subsequent validation run stays --network none. Returns
+        `(tag, None)` on success, or `(base_image, failure_result)` if the deps
+        don't install."""
+        hasher = hashlib.sha256()
+        hasher.update(profile.image.encode())
+        hasher.update(b"\n")
+        hasher.update((profile.install_command or "").encode())
+        for name in manifests:
+            hasher.update(b"\n--\n")
+            hasher.update(name.encode())
+            hasher.update(b"\n")
+            hasher.update((worktree_path / name).read_bytes())
+        tag = f"ai-os-sandbox-dep:{hasher.hexdigest()[:16]}"
+
+        if await self._image_exists(tag):
+            return tag, None
+
+        with tempfile.TemporaryDirectory(prefix="ai-os-depbuild-") as ctx_dir:
+            ctx = Path(ctx_dir)
+            copy_lines = []
+            for name in manifests:
+                (ctx / name).write_bytes((worktree_path / name).read_bytes())
+                copy_lines.append(f"COPY {name} ./{name}")
+            dockerfile = (
+                f"FROM {profile.image}\n"
+                "WORKDIR /deps\n"
+                + "\n".join(copy_lines)
+                + f"\nRUN {profile.install_command}\n"
+            )
+            (ctx / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+
+            proc = await asyncio.create_subprocess_exec(
+                self.docker_cli, "build", "-t", tag, str(ctx),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                out, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.build_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                feedback = build_feedback(
+                    success=False, exit_code=124,
+                    raw_output=f"Dependency install timed out after {self.build_timeout_seconds}s.",
+                )
+                return profile.image, ValidationResult(
+                    success=False, exit_code=124,
+                    summary="Dependency install timed out.", output=feedback["output"],
+                )
+
+            if proc.returncode != 0:
+                raw = out.decode(errors="replace")
+                feedback = build_feedback(
+                    success=False, exit_code=proc.returncode or 1,
+                    raw_output=(
+                        "Dependency install failed while building the sandbox image "
+                        f"from {', '.join(manifests)}:\n{raw}"
+                    ),
+                )
+                return profile.image, ValidationResult(
+                    success=False, exit_code=proc.returncode or 1,
+                    summary="Dependency install failed.", output=feedback["output"],
+                )
+
+        return tag, None
+
+    async def _image_exists(self, tag: str) -> bool:
+        proc = await asyncio.create_subprocess_exec(
+            self.docker_cli, "image", "inspect", tag,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        return proc.returncode == 0

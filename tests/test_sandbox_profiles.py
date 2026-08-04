@@ -36,10 +36,34 @@ def test_every_supported_language_has_a_profile():
         assert profile.image and profile.command
 
 
-def test_java_profile_is_maven_mvn_test():
+def test_java_profile_is_maven_two_phase():
     profile = SANDBOX_PROFILES["java"]
     assert profile.image == "maven:3.9-eclipse-temurin-17-alpine"
-    assert profile.command == "mvn test"
+    # Two-phase: go-offline in the build, offline `test` in the validation run.
+    assert profile.dependency_manifests == ("pom.xml",)
+    assert "go-offline" in profile.install_command
+    assert profile.command == "mvn -o -Dmaven.repo.local=/deps/.m2 test"
+
+
+def test_two_phase_profiles_declare_manifests_and_install():
+    # Every ecosystem that needs third-party deps has a phase-1 config.
+    for language, manifests in {
+        "python": ("requirements.txt",),
+        "javascript": ("package.json", "package-lock.json"),
+        "typescript": ("package.json", "package-lock.json"),
+        "java": ("pom.xml",),
+    }.items():
+        profile = SANDBOX_PROFILES[language]
+        assert profile.dependency_manifests == manifests
+        assert profile.install_command  # non-empty
+
+
+def test_node_profiles_point_node_path_at_out_of_tree_deps():
+    for language in ("javascript", "typescript"):
+        profile = SANDBOX_PROFILES[language]
+        env = dict(profile.run_env)
+        assert env["NODE_PATH"] == "/deps/node_modules"
+        assert env["PATH"].startswith("/deps/node_modules/.bin:")
 
 
 @pytest.mark.parametrize("language", ALL_LANGUAGES)
