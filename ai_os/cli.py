@@ -22,6 +22,7 @@ from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
 from ai_os.core.persistence import Persistence, default_db_url
 from ai_os.core.scheduler import DynamicScheduler
+from ai_os.core.scheduling_policy import SchedulingPolicy
 from ai_os.core.staging import GitStagingEngine
 from ai_os.core.task_runner import TaskRunner, build_claude_cli_agent_turn_executor
 from ai_os.knowledge.graph_engine import KnowledgeEngine
@@ -435,6 +436,9 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool) -> None:
             sandbox_runner=EphemeralSandboxRunner(),
             on_status_change=lambda tid, status: console.print(f"[dim]{tid}: {status}[/dim]"),
             persistence=persistence,
+            # Stage 4: rate-limit backoff + provider fallback always on; the
+            # optional cost cap comes from AI_OS_EPIC_BUDGET_USD in the env.
+            scheduling_policy=SchedulingPolicy.from_env(),
         )
         try:
             return await runner.run_epic(tasks, epic_title=prompt[:120], raw_prompt=prompt)

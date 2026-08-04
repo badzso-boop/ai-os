@@ -97,6 +97,16 @@ class DynamicScheduler:
         model = self.model_matrix.get(provider, {}).get(risk_level)
         return Assignment(provider=provider, model=model)
 
+    def assignments_in_order(self, risk_level: str) -> list[Assignment]:
+        """Every configured (provider, model) for `risk_level`, in preference
+        order — the fallback chain the adaptive scheduler (Stage 4) tries when
+        the preferred provider keeps rate-limiting. The first element equals
+        `assign(risk_level)`. Empty if no provider is configured for the level."""
+        return [
+            Assignment(provider=p, model=self.model_matrix.get(p, {}).get(risk_level))
+            for p in self.router.resolve_providers(risk_level)
+        ]
+
     def planning_assignment(self) -> Assignment:
         """Decomposition/planning is architectural work — route it as CRITICAL
         so it lands on the strongest configured model."""

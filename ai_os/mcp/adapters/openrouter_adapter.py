@@ -52,6 +52,7 @@ from ai_os.mcp.adapters.base_adapter import (
     ToolDispatch,
     ToolSpec,
     TokenUsage,
+    raise_if_rate_limited,
 )
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -137,6 +138,7 @@ class OpenRouterAdapter(BaseMCPAdapter):
         client = self._get_client()
         response = await client.post(OPENROUTER_API_URL, headers=headers, json=payload)
 
+        raise_if_rate_limited(response.status_code, response.headers, "openrouter")
         if response.status_code // 100 != 2:
             raise OpenRouterApiError(response.status_code, response.text)
 
@@ -257,6 +259,7 @@ class OpenRouterAdapter(BaseMCPAdapter):
             response = await client.post(
                 OPENROUTER_API_URL, headers=headers, json=payload
             )
+            raise_if_rate_limited(response.status_code, response.headers, "openrouter")
             if response.status_code // 100 != 2:
                 raise OpenRouterApiError(response.status_code, response.text)
 

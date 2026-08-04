@@ -20,7 +20,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q          # 261 tests (260 passed + 1 documented xfail), ~32s (real Docker containers) — never makes a real LLM/network-to-a-provider call
+.venv/bin/pytest -q          # 276 tests (275 passed + 1 documented xfail), ~33s (real Docker containers) — never makes a real LLM/network-to-a-provider call
 .venv/bin/ai-os epic history                          # past epics: status, task counts, token/USD spend (Phase 5 Stage 3)
 .venv/bin/ai-os cost [--epic <id>]                    # spend grouped by provider+model, from the accounting DB
 cp .env.example .env         # fill in whichever provider credentials you have
@@ -203,13 +203,13 @@ Closes the gap between "run one hand-specified task" (Phase 3b's `ai-os task run
 - ~~Tool-calling loops for non-Anthropic-CLI providers~~ — **done in Phase 5 Stage 1** (see below).
 - Diff-based patching for large files (completion executor sends whole files) — **planned as Phase 5 Stage 2, not yet built**.
 - The React Glass Box UI, WebSocket streaming, runtime preemption (Stage 2), Monaco manual-edit recovery (Stage 3) — Phase 4b.
-- Real TPM/RPM/cost-based scheduling (doc 02 §2.2) — **planned as Phase 5 Stage 4, not yet built**.
+- ~~Real TPM/RPM/cost-based scheduling (doc 02 §2.2)~~ — **done in Phase 5 Stage 4** (adaptive 429 backoff + provider fallback + optional cost cap; see below).
 
 ---
 
 ## Phase 5 — how it actually works (in progress)
 
-Closes four of the deliberately-deferred gaps, in four independently-committed stages. **Stages 1 (multi-provider autonomous tool-calling), 2 (edit-based patching), and 3 (LockAudit/TokenCost persistence) are done**; Stage 4 (adaptive rate-limit/cost-aware scheduling) is planned but not yet built. Same testing philosophy as every prior phase: no real LLM/network/Docker in the automated suite (fake tool-calling adapters scripting a tool-call-then-final-answer sequence, `httpx.MockTransport` for the adapter wire-format tests, real disposable git repos + fake sandbox); the real "a live model autonomously calls tools over its own API" run stays a manual `ai-os epic run` step.
+Closes four of the deliberately-deferred gaps, in four independently-committed stages. **All four stages are done**: 1 (multi-provider autonomous tool-calling), 2 (edit-based patching), 3 (LockAudit/TokenCost persistence), 4 (adaptive rate-limit + cost-aware scheduling). Same testing philosophy as every prior phase: no real LLM/network/Docker in the automated suite (fake tool-calling adapters scripting a tool-call-then-final-answer sequence, `httpx.MockTransport` for the adapter wire-format tests, real disposable git repos + fake sandbox); the real "a live model autonomously calls tools over its own API" run stays a manual `ai-os epic run` step.
 
 ### Stage 1 — Multi-provider autonomous tool-calling (implemented)
 
@@ -247,9 +247,16 @@ The `LockAuditModel`/`TokenCostModel` tables (schema since Phase 2) finally get 
 
 Tests: `test_persistence.py` (real tmp SQLite — full FK chain, FK-rejects-orphan-cost, upsert status/model, provider grouping, epic-scoped totals), `test_epic_runner.py::test_epic_run_persists_accounting_rows` (a real epic run leaves epic/task/token_cost rows), `test_cli_epic.py` (cost/history read back seeded spend; epic-run DB isolated to a tmp `AI_OS_HOME`).
 
-### Stage 4 — planned, not yet built
+### Stage 4 — Adaptive rate-limit + cost-aware scheduling (implemented)
 
-- **Adaptive rate-limit + cost-aware scheduling** (doc 02 §2.2): adapters surface a typed `RateLimitedError` on HTTP 429 (with `Retry-After`); a new `ai_os/core/scheduling_policy.py` adds exponential backoff + provider fallback (why risk→provider order is a list) + an optional `AI_OS_EPIC_BUDGET_USD` cap (reads Stage 3's `epic_total_usd`). Adaptive, NOT hardcoded TPM/RPM numbers.
+Deliberately **adaptive** (reacts to the 429s providers actually report), not hardcoded TPM/RPM numbers — for the Claude subscription CLI path there's no clean per-minute token figure to police anyway.
+- **`RateLimitedError(provider, retry_after)`** in `base_adapter.py` + helpers `parse_retry_after` (numeric `Retry-After`; HTTP-date form → `None` → exponential) and `raise_if_rate_limited(status, headers, provider)`. All three HTTP adapters (Gemini, OpenRouter, Anthropic API-key) raise it on HTTP 429, in both `execute_task` and `execute_with_tools`.
+- **`ai_os/core/scheduling_policy.py`** — `SchedulingPolicy` (injectable `sleep` for tests): `with_backoff` (retry the same provider on `RateLimitedError`, honoring `retry_after` else exponential, up to `max_rate_limit_retries`, then re-raise); `run_over_providers` (walk a `(provider, attempt)` list, moving to the next only on persistent rate-limiting — non-429 errors propagate immediately); `check_budget` (raises `BudgetExceededError` at the cap). `from_env` reads `AI_OS_EPIC_BUDGET_USD` + `AI_OS_RATE_LIMIT_RETRIES`.
+- **Provider fallback wiring**: `ProtocolRouter.resolve_providers` / `DynamicScheduler.assignments_in_order` return the full ordered list of *configured* providers for a risk level. When `EpicRunner` has a `scheduling_policy`, `_build_executor` composes one `_build_single_executor` per candidate provider into a fallback chain wrapped in backoff — so a throttled Gemini task transparently completes on OpenRouter/Anthropic, and token accounting stays correct because each executor reports the provider that actually ran.
+- **Cost cap**: before each batch, `EpicRunner._epic_over_budget` sums the epic's spend (Stage 3's `epic_total_usd`) against the cap; once hit, every remaining task is marked `SKIPPED` and the run stops. Needs persistence (the spend source) + a budget; otherwise a no-op.
+- **CLI**: `ai-os epic run` always passes `SchedulingPolicy.from_env()` (backoff + fallback always on; cost cap only if `AI_OS_EPIC_BUDGET_USD` is set). Still explicitly NOT a full distributed rate-limiter — in-process, single-run scope.
+
+Tests: `test_scheduling_policy.py` (backoff timing with injected sleep incl. `retry_after`, exhaustion re-raise, non-429 immediate propagation, provider fallback, budget cap, `from_env` parsing, and Gemini/OpenRouter really raising `RateLimitedError` on a 429 via `MockTransport`); `test_epic_runner.py` (a rate-limited primary provider falls back to a working one and the task completes; a tiny budget skips the dependent task after the first batch's spend).
 
 ---
 
@@ -270,7 +277,7 @@ When starting Phase 3+ implementation, follow this structure unless there's a co
 | Doc | Subsystem |
 | --- | --- |
 | `01_ARCHITECTURE_OVERVIEW.md` | Full system diagram, end-to-end flow, responsibility matrix |
-| `02_ORCHESTRATOR_CORE.md` | DAG Planner (`TaskNode` schema), Dynamic Scheduler (risk→model matrix), async `LockManager` — **TaskNode/planner/lock_manager in Phase 2, LLM decomposition + risk→model scheduler in Phase 4a** (`epic_planner.py`/`scheduler.py`); TPM/RPM/cost-based scheduling still not built |
+| `02_ORCHESTRATOR_CORE.md` | DAG Planner (`TaskNode` schema), Dynamic Scheduler (risk→model matrix), async `LockManager` — **TaskNode/planner/lock_manager in Phase 2, LLM decomposition + risk→model scheduler in Phase 4a** (`epic_planner.py`/`scheduler.py`); **adaptive rate-limit backoff + provider fallback + cost cap in Phase 5 Stage 4** (`scheduling_policy.py`) |
 | `03_POLYGLOT_ANALYZER.md` | Tree-sitter language support, symbol/call-graph extraction, incremental re-parse on file change (Phase 1 implements the non-incremental parts; incremental re-parse is not built) |
 | `04_KNOWLEDGE_CONTEXT_ENGINE.md` | Knowledge Graph node/edge types, skeleton/stub context compression, event-driven cache invalidation (Phase 1 implements the graph + stubs; event-driven invalidation is not built) |
 | `05_EXECUTION_VALIDATION_SANDBOX.md` | Git worktree isolation + ephemeral Docker validation + feedback/HITL state machine — worktree isolation (Phase 2) + Docker sandbox (Phase 3b) + retry loop (`task_runner.py`) all **implemented**; full HITL UI (Phase 4) not built |

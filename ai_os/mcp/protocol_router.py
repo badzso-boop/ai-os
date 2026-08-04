@@ -76,6 +76,13 @@ class ProtocolRouter:
             f"(tried: {candidates}, configured: {sorted(self.adapters)})"
         )
 
+    def resolve_providers(self, risk_level: str) -> list[str]:
+        """Every configured provider for `risk_level`, in preference order — the
+        full fallback chain the adaptive scheduler (Stage 4) walks when the
+        preferred one keeps rate-limiting. Empty if none are configured (the
+        caller decides whether that's an error, unlike `resolve_provider`)."""
+        return [p for p in self.risk_provider_order.get(risk_level, []) if p in self.adapters]
+
     async def execute(self, provider: str, request: LLMTaskRequest) -> LLMTaskResponse:
         """Explicit-provider-choice execution, bypassing risk-level routing."""
         adapter = self.adapters.get(provider)

@@ -59,6 +59,7 @@ from ai_os.mcp.adapters.base_adapter import (
     TokenUsage,
     ToolDispatch,
     ToolSpec,
+    raise_if_rate_limited,
 )
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
@@ -242,6 +243,7 @@ class AnthropicAdapter(BaseMCPAdapter):
         async with httpx.AsyncClient() as client:
             response = await client.post(ANTHROPIC_API_URL, headers=headers, json=body)
 
+        raise_if_rate_limited(response.status_code, response.headers, "anthropic")
         if response.status_code // 100 != 2:
             raise AnthropicApiError(response.status_code, response.text)
 
@@ -340,6 +342,7 @@ class AnthropicAdapter(BaseMCPAdapter):
                 response = await client.post(
                     ANTHROPIC_API_URL, headers=headers, json=body
                 )
+                raise_if_rate_limited(response.status_code, response.headers, "anthropic")
                 if response.status_code // 100 != 2:
                     raise AnthropicApiError(response.status_code, response.text)
 

@@ -38,6 +38,7 @@ from ai_os.mcp.adapters.base_adapter import (
     TokenUsage,
     ToolDispatch,
     ToolSpec,
+    raise_if_rate_limited,
 )
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -72,6 +73,7 @@ class GeminiAdapter(BaseMCPAdapter):
 
         response = await self.client.post(url, json=payload)
 
+        raise_if_rate_limited(response.status_code, response.headers, "gemini")
         if response.status_code < 200 or response.status_code >= 300:
             raise GeminiApiError(
                 f"Gemini API returned HTTP {response.status_code} for model "
@@ -131,6 +133,7 @@ class GeminiAdapter(BaseMCPAdapter):
         url = f"{GEMINI_API_BASE}/{model}:generateContent?key={self.api_key}"
         response = await self.client.post(url, json=payload)
 
+        raise_if_rate_limited(response.status_code, response.headers, "gemini")
         if response.status_code < 200 or response.status_code >= 300:
             raise GeminiApiError(
                 f"Gemini API returned HTTP {response.status_code} for model "

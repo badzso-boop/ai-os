@@ -43,6 +43,7 @@ from ai_os.core.task_runner import (
     build_completion_agent_turn_executor,
     build_tool_calling_agent_turn_executor,
 )
+from ai_os.core.scheduling_policy import BudgetExceededError, SchedulingPolicy
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import BaseMCPAdapter
 from ai_os.sandbox.container_runner import EphemeralSandboxRunner
@@ -75,6 +76,7 @@ class EpicRunner:
         sandbox_runner=None,
         on_status_change: Optional[Callable[[str, str], None]] = None,
         persistence: Optional["Persistence"] = None,
+        scheduling_policy: Optional[SchedulingPolicy] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.scheduler = scheduler
@@ -86,6 +88,10 @@ class EpicRunner:
         # created up front (the audit tables FK to them), and each TaskRunner
         # records token cost + lock audit + status against those rows.
         self.persistence = persistence
+        # Optional adaptive scheduling (Stage 4). When set, each task's agent
+        # turn is wrapped with rate-limit backoff + provider fallback, and (if a
+        # budget is configured) the epic aborts once spend hits the cap.
+        self.scheduling_policy = scheduling_policy
         # Shared across every task in the epic — this is what makes Phase 2's
         # locking/merge serialization actually apply across concurrent tasks.
         self.lock_manager = LockManager()
@@ -103,6 +109,34 @@ class EpicRunner:
         return {t.id: self.scheduler.assign(t.risk_level) for t in tasks}
 
     def _build_executor(
+        self, task: TaskNode, assignment: Assignment, engine: KnowledgeEngine, graph_json_path: Path
+    ) -> AgentTurnExecutor:
+        # No adaptive policy -> a single executor bound to the primary
+        # assignment, exactly as before Stage 4.
+        if self.scheduling_policy is None:
+            return self._build_single_executor(task, assignment, engine, graph_json_path)
+
+        # With a policy: build one executor per configured provider for this
+        # task's risk (in preference order, primary first) and compose them into
+        # a fallback chain wrapped in rate-limit backoff. On persistent
+        # rate-limiting from one provider, the next takes over — token accounting
+        # stays correct because each executor reports the provider that actually
+        # ran.
+        assignments = self.scheduler.assignments_in_order(task.risk_level) or [assignment]
+        attempts_builders = [
+            (a.provider, self._build_single_executor(task, a, engine, graph_json_path))
+            for a in assignments
+        ]
+        policy = self.scheduling_policy
+
+        async def composite(ctx):
+            return await policy.run_over_providers(
+                [(prov, (lambda ex=ex: ex(ctx))) for prov, ex in attempts_builders]
+            )
+
+        return composite
+
+    def _build_single_executor(
         self, task: TaskNode, assignment: Assignment, engine: KnowledgeEngine, graph_json_path: Path
     ) -> AgentTurnExecutor:
         adapter = self.adapters[assignment.provider]
@@ -153,6 +187,24 @@ class EpicRunner:
         )
         return await runner.run_task(task, language=self.language)
 
+    async def _epic_over_budget(self, epic_id: Optional[str]) -> bool:
+        """True if a cost cap is configured and the epic's recorded spend has
+        reached it. Needs persistence (the spend source) + a budget in the
+        policy; otherwise always False."""
+        if (
+            self.scheduling_policy is None
+            or self.scheduling_policy.budget_usd is None
+            or self.persistence is None
+            or epic_id is None
+        ):
+            return False
+        spent = await self.persistence.epic_total_usd(epic_id)
+        try:
+            self.scheduling_policy.check_budget(spent)
+        except BudgetExceededError:
+            return True
+        return False
+
     async def run_epic(
         self, tasks: list[TaskNode], epic_title: str = "epic", raw_prompt: str = ""
     ) -> EpicRunResult:
@@ -176,7 +228,14 @@ class EpicRunner:
                     task, epic_id, assigned_model=result.assignments[task.id].model, status="PENDING"
                 )
 
+        budget_hit = False
         for batch in batches:
+            # Cost cap (Stage 4): before starting a batch, if the epic's spend so
+            # far has hit the budget, skip every remaining task and stop.
+            if await self._epic_over_budget(epic_id):
+                budget_hit = True
+                break
+
             engine = self._build_engine()  # fresh scan: later batches see earlier merges
             with tempfile.TemporaryDirectory(prefix="ai-os-epic-graph-") as tmp_dir:
                 graph_json_path = Path(tmp_dir) / "graph.json"
@@ -210,6 +269,12 @@ class EpicRunner:
                     result.completed.append(task.id)
                 else:
                     result.blocked.append(task.id)
+
+        if budget_hit:
+            # Everything not already terminal is skipped due to the cost cap.
+            for t in tasks:
+                if t.id not in result.completed and t.id not in result.blocked and t.id not in result.skipped:
+                    result.skipped.append(t.id)
 
         if self.persistence is not None and epic_id is not None:
             final_status = "COMPLETED" if not result.blocked and not result.skipped else "FAILED"

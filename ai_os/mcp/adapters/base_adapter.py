@@ -67,6 +67,42 @@ class ToolCallingNotSupported(NotImplementedError):
     fall back to a completion strategy rather than silently getting no tools)."""
 
 
+class RateLimitedError(RuntimeError):
+    """A provider returned HTTP 429 (rate limited). Carries the provider name and
+    any `Retry-After` hint (seconds) so `ai_os.core.scheduling_policy` can back
+    off for the right amount of time and, failing that, fall back to the next
+    configured provider in the task's risk order (Phase 5 Stage 4)."""
+
+    def __init__(self, provider: str, retry_after: float | None = None, message: str = "") -> None:
+        self.provider = provider
+        self.retry_after = retry_after
+        super().__init__(
+            message or f"{provider} rate-limited (HTTP 429; retry_after={retry_after})"
+        )
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Parse a `Retry-After` header value into seconds. Handles the numeric
+    (delta-seconds) form; the HTTP-date form is deliberately ignored (returns
+    `None` -> caller uses exponential backoff), rather than pulling in date
+    parsing for a hint we can approximate perfectly well without."""
+    if not value:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def raise_if_rate_limited(status_code: int, headers, provider: str) -> None:
+    """Raise `RateLimitedError` iff `status_code` is 429, reading `Retry-After`
+    from `headers` (an `httpx.Headers`/mapping). A no-op otherwise, so adapters
+    call it right before their generic non-2xx error check."""
+    if status_code == 429:
+        retry_after = parse_retry_after(headers.get("retry-after") if headers is not None else None)
+        raise RateLimitedError(provider, retry_after=retry_after)
+
+
 class BaseMCPAdapter(ABC):
     """One adapter instance talks to exactly one provider."""
 
