@@ -60,6 +60,14 @@ class ProviderSpend:
     total_usd: float
 
 
+@dataclass
+class EpicRow:
+    id: str
+    title: str
+    raw_user_prompt: str
+    status: str
+
+
 class Persistence:
     """Async repository. One instance wraps a session factory bound to one
     engine; construct it via `open(db_url)` (which creates the schema) or
@@ -238,6 +246,46 @@ class Persistence:
                 )
                 for r in rows
             ]
+
+    async def get_epic(self, epic_id: str) -> EpicRow | None:
+        """The epic row, or `None` if no such epic — used by `epic resume` to
+        validate the id before doing anything."""
+        async with self._sf() as session:
+            epic = await session.get(EpicModel, epic_id)
+            if epic is None:
+                return None
+            return EpicRow(
+                id=epic.id, title=epic.title,
+                raw_user_prompt=epic.raw_user_prompt, status=epic.status,
+            )
+
+    async def load_epic_tasks(self, epic_id: str) -> list[tuple[TaskNode, str]]:
+        """Reconstruct every task of an epic as a `(TaskNode, db_status)` pair,
+        so `EpicRunner.resume_epic` can rebuild the DAG and re-run only the tasks
+        that aren't already COMPLETED. The stored rows were validated at creation
+        time, so reconstructing the `TaskNode` (which re-runs its validators)
+        cannot fail on well-formed data."""
+        async with self._sf() as session:
+            rows = (
+                await session.execute(
+                    select(TaskModel).where(TaskModel.epic_id == epic_id).order_by(TaskModel.id)
+                )
+            ).scalars().all()
+            out: list[tuple[TaskNode, str]] = []
+            for r in rows:
+                node = TaskNode(
+                    id=r.id,
+                    title=r.title,
+                    description=r.description,
+                    risk_level=r.risk_level,
+                    target_files=list(r.target_files or []),
+                    read_set=set(r.read_set or []),
+                    write_set=set(r.write_set or []),
+                    dependencies=list(r.dependencies or []),
+                    max_retries=r.max_retries,
+                )
+                out.append((node, r.status))
+            return out
 
     async def epic_total_usd(self, epic_id: str) -> float:
         """Total USD spent on one epic so far — the cost-cap check reads this

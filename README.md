@@ -119,7 +119,7 @@ cd ai-os
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # 2. Run the test suite (real Docker containers; never makes a real LLM/network call)
-.venv/bin/pytest -q          # 285 tests (284 passed + 1 documented xfail), ~33s
+.venv/bin/pytest -q          # 298 tests (296 passed + 1 skipped opt-in + 1 documented xfail), ~32s
 
 # 3. One-time: build the sandbox image used to validate Python tasks
 #    (bakes pytest in, since the sandbox runs with --network none)
@@ -224,6 +224,11 @@ Decomposes a high-level request into a task DAG, shows the proposed plan (HITL p
 ai-os epic run my-project --prompt "add JWT authentication" --language python
 # review the printed DAG, then approve at the prompt — or skip the gate:
 ai-os epic run my-project --prompt "add JWT authentication" --language python --yes
+
+# Resume a crashed/interrupted epic — re-runs only the tasks that weren't
+# already COMPLETED (their merged work is kept). Get the epic id from
+# `ai-os epic history`.
+ai-os epic resume my-project --epic <epic-id> --language python
 ```
 
 ### G. Read back accounting

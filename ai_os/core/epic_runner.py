@@ -208,11 +208,6 @@ class EpicRunner:
     async def run_epic(
         self, tasks: list[TaskNode], epic_title: str = "epic", raw_prompt: str = ""
     ) -> EpicRunResult:
-        graph = planner.build_graph(tasks)
-        planner.validate_acyclic(graph)
-        batches = planner.topological_batches(graph)
-        by_id = {t.id: t for t in tasks}
-
         result = EpicRunResult()
         result.assignments = self.plan_assignments(tasks)
 
@@ -227,6 +222,51 @@ class EpicRunner:
                 await self.persistence.upsert_task(
                     task, epic_id, assigned_model=result.assignments[task.id].model, status="PENDING"
                 )
+
+        return await self._execute_batches(tasks, result, epic_id)
+
+    async def resume_epic(self, epic_id: str) -> EpicRunResult:
+        """Resume a crashed/interrupted epic: reload its tasks + statuses from
+        the accounting DB, treat the already-COMPLETED ones as done (their code
+        is already merged to `main`), and run only the rest — respecting the DAG.
+
+        Requires persistence (that's where the crash-surviving state lives). The
+        per-task worktree policy stays "start fresh" (a half-done worktree from
+        the crashed run is discarded and its task re-run cleanly); resume is the
+        EPIC-level guarantee that completed work isn't redone.
+        """
+        if self.persistence is None:
+            raise ValueError("resume_epic requires a persistence-backed EpicRunner")
+        epic = await self.persistence.get_epic(epic_id)
+        if epic is None:
+            raise ValueError(f"No epic with id {epic_id!r} in the accounting DB")
+        loaded = await self.persistence.load_epic_tasks(epic_id)
+        if not loaded:
+            raise ValueError(f"Epic {epic_id!r} has no recorded tasks to resume")
+
+        tasks = [node for node, _status in loaded]
+        result = EpicRunResult()
+        result.epic_id = epic_id
+        result.assignments = self.plan_assignments(tasks)
+        # Pre-seed the completed set from the DB so already-done tasks are not
+        # re-run and their dependents can proceed against the merged code.
+        result.completed = [node.id for node, status in loaded if status == "COMPLETED"]
+
+        await self.persistence.set_epic_status(epic_id, "RUNNING")
+        return await self._execute_batches(tasks, result, epic_id)
+
+    async def _execute_batches(
+        self, tasks: list[TaskNode], result: EpicRunResult, epic_id: Optional[str]
+    ) -> EpicRunResult:
+        """The shared batch-execution core for both `run_epic` and `resume_epic`.
+        Any task id already present in `result.completed` on entry (resume's
+        pre-seed) is treated as done: not re-run, but counted as satisfying its
+        dependents' dependencies."""
+        graph = planner.build_graph(tasks)
+        planner.validate_acyclic(graph)
+        batches = planner.topological_batches(graph)
+        by_id = {t.id: t for t in tasks}
+        already_done = set(result.completed)
 
         budget_hit = False
         for batch in batches:
@@ -243,6 +283,8 @@ class EpicRunner:
 
                 runnable: list[TaskNode] = []
                 for task_id in batch:
+                    if task_id in already_done:
+                        continue  # resume: already COMPLETED in a prior run — skip
                     task = by_id[task_id]
                     deps_ok = all(dep in result.completed for dep in task.dependencies)
                     if deps_ok:

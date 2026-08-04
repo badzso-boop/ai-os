@@ -90,14 +90,53 @@ SANDBOX_PROFILES: dict[str, SandboxProfile] = {
     ),
     "javascript": SandboxProfile("node:20-alpine", "npm test"),
     "typescript": SandboxProfile("node:20-alpine", "npx tsc --noEmit && npm test"),
-    # Java is a real, correct profile entry but deliberately NOT exercised
-    # by the automated test suite: maven:3.9-eclipse-temurin-17-alpine is a
-    # much heavier image to pull than the others, and this is a shared host
-    # (see module docstring / CLAUDE.md) — pulling it just for test coverage
-    # of an otherwise-identical code path was judged not worth the cost.
-    # This is a deliberate, flagged scope cut, not an oversight.
+    # Java's profile config + hardened argv ARE covered by the automated suite
+    # (see tests/test_sandbox_profiles.py — deterministic, no container). A
+    # real end-to-end Maven container run is gated behind an opt-in env var
+    # (AI_OS_TEST_JAVA_SANDBOX=1) rather than run by default, because
+    # maven:3.9-eclipse-temurin-17-alpine is a much heavier image to pull than
+    # the others and this is a shared host (see module docstring / CLAUDE.md) —
+    # so the heavy pull happens only when explicitly requested, never on a
+    # routine `pytest`.
     "java": SandboxProfile("maven:3.9-eclipse-temurin-17-alpine", "mvn test"),
 }
+
+
+def build_docker_argv(
+    docker_cli: str, worktree_path: Path, container_name: str, profile: SandboxProfile
+) -> list[str]:
+    """Build the hardened `docker run ...` argv for one validation run.
+
+    Factored out of `run_validation` so the exact hardening flags + per-language
+    image/command can be asserted deterministically in tests without actually
+    pulling a (possibly heavy, e.g. Maven/JDK) image or running a container on a
+    shared host — the Java profile in particular is covered this way. The order
+    and content here must stay in lockstep with doc 10 §1.1's hardening list.
+    """
+    return [
+        docker_cli,
+        "run",
+        "--rm",
+        "--name",
+        container_name,
+        "-v",
+        f"{Path(worktree_path).resolve()}:/app:ro",
+        "--workdir",
+        "/app",
+        "--network",
+        "none",
+        "--memory=2g",
+        "--cpus=2.0",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=256m",
+        "--cap-drop=ALL",
+        "--user",
+        "1000:1000",
+        profile.image,
+        "sh",
+        "-c",
+        profile.command,
+    ]
 
 
 class SandboxLanguageNotSupportedError(ValueError):
@@ -143,30 +182,7 @@ class EphemeralSandboxRunner:
             )
 
         container_name = f"ai-os-sandbox-{uuid.uuid4().hex[:12]}"
-        argv = [
-            self.docker_cli,
-            "run",
-            "--rm",
-            "--name",
-            container_name,
-            "-v",
-            f"{Path(worktree_path).resolve()}:/app:ro",
-            "--workdir",
-            "/app",
-            "--network",
-            "none",
-            "--memory=2g",
-            "--cpus=2.0",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=256m",
-            "--cap-drop=ALL",
-            "--user",
-            "1000:1000",
-            profile.image,
-            "sh",
-            "-c",
-            profile.command,
-        ]
+        argv = build_docker_argv(self.docker_cli, worktree_path, container_name, profile)
 
         proc = await asyncio.create_subprocess_exec(
             *argv,

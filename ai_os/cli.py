@@ -561,6 +561,54 @@ def epic_history() -> None:
     console.print(table)
 
 
+@epic.command("resume")
+@click.argument("name_or_path")
+@click.option("--epic", "epic_id", required=True, help="The epic id to resume (see `ai-os epic history`).")
+@click.option("--language", required=True, type=click.Choice(_LANGUAGE_CHOICES))
+def epic_resume(name_or_path: str, epic_id: str, language: str) -> None:
+    """Resume a crashed/interrupted epic: re-run only the tasks that weren't
+    already COMPLETED (their merged work is kept), respecting the DAG. The task
+    statuses come from the accounting DB; you supply the project + language
+    again (they aren't stored). Makes REAL LLM calls for the remaining tasks.
+    """
+    try:
+        root = registry.resolve(name_or_path)
+    except registry.ProjectPathError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    adapters = load_configured_adapters()
+    if not adapters:
+        raise click.ClickException(
+            "No LLM providers configured. Copy .env.example to .env and add credentials."
+        )
+    router = ProtocolRouter(adapters, risk_provider_order=risk_provider_order_from_env())
+    scheduler = DynamicScheduler(router)
+
+    async def _resume():
+        persistence, engine = await Persistence.open(default_db_url())
+        runner = EpicRunner(
+            repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
+            sandbox_runner=EphemeralSandboxRunner(),
+            on_status_change=lambda tid, status: console.print(f"[dim]{tid}: {status}[/dim]"),
+            persistence=persistence,
+            scheduling_policy=SchedulingPolicy.from_env(),
+        )
+        try:
+            return await runner.resume_epic(epic_id)
+        finally:
+            await engine.dispose()
+
+    try:
+        result = asyncio.run(_resume())
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    console.print("\n[bold]Epic resume finished.[/bold]")
+    console.print(f"  [green]Completed[/green]: {', '.join(result.completed) or '-'}")
+    console.print(f"  [red]Blocked[/red]:   {', '.join(result.blocked) or '-'}")
+    console.print(f"  [yellow]Skipped[/yellow]:   {', '.join(result.skipped) or '-'}")
+
+
 @main.command("cost")
 @click.option("--epic", "epic_id", default=None, help="Scope the breakdown to one epic id (default: all epics).")
 def cost(epic_id: str | None) -> None:

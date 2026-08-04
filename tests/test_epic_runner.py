@@ -42,9 +42,11 @@ class _FilePerTaskAdapter(BaseMCPAdapter):
 
     def __init__(self) -> None:
         self.models_seen: list[str | None] = []
+        self.task_ids_seen: list[str] = []
 
     async def execute_task(self, request: LLMTaskRequest) -> LLMTaskResponse:
         self.models_seen.append(request.model)
+        self.task_ids_seen.append(request.task_id)
         # task_id is the LLMTaskRequest.task_id
         filename = f"{request.task_id}.py"
         text = f"<<<AI_OS_FILE: {filename}>>>\nTASK_ID = {request.task_id!r}\n<<<AI_OS_END>>>"
@@ -225,6 +227,66 @@ async def test_budget_cap_skips_remaining_tasks(git_repo: Path, tmp_path: Path):
     assert result.completed == ["A"]
     assert result.skipped == ["B"]
     await engine.dispose()
+
+
+async def test_resume_epic_reruns_only_incomplete_tasks(git_repo: Path, tmp_path: Path):
+    from ai_os.core.persistence import Persistence
+
+    persistence, engine = await Persistence.open(f"sqlite+aiosqlite:///{tmp_path / 'r.db'}")
+    # Seed the state a crash would have left: epic E with A COMPLETED (its work
+    # already merged to main) and B (depends on A) still PENDING.
+    await persistence.create_epic("E", "demo", "do A then B", status="FAILED")
+    a, b = _task("A"), _task("B", deps=["A"])
+    await persistence.upsert_task(a, "E", assigned_model=None, status="COMPLETED")
+    await persistence.upsert_task(b, "E", assigned_model=None, status="PENDING")
+    # A's merged work is on main already:
+    (git_repo / "A.py").write_text("TASK_ID = 'A'\n")
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "A done"], cwd=git_repo, check=True)
+
+    adapter = _FilePerTaskAdapter()
+    router = ProtocolRouter({"gemini": adapter})
+    scheduler = DynamicScheduler(router, environ={})
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=scheduler, adapters={"gemini": adapter},
+        language="python", sandbox_runner=_AlwaysPassSandbox(), persistence=persistence,
+    )
+    result = await runner.resume_epic("E")
+
+    # A was pre-seeded completed (not re-run); only B actually executed.
+    assert set(result.completed) == {"A", "B"}
+    assert adapter.task_ids_seen == ["B"]
+    assert (git_repo / "B.py").read_text() == "TASK_ID = 'B'"
+    # The epic is now COMPLETED in the DB.
+    summaries = await persistence.epic_summaries()
+    assert summaries[0].status == "COMPLETED"
+    await engine.dispose()
+
+
+async def test_resume_epic_unknown_id_raises(git_repo: Path, tmp_path: Path):
+    from ai_os.core.persistence import Persistence
+
+    persistence, engine = await Persistence.open(f"sqlite+aiosqlite:///{tmp_path / 'r2.db'}")
+    adapter = _FilePerTaskAdapter()
+    scheduler = DynamicScheduler(ProtocolRouter({"gemini": adapter}), environ={})
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=scheduler, adapters={"gemini": adapter},
+        language="python", sandbox_runner=_AlwaysPassSandbox(), persistence=persistence,
+    )
+    with pytest.raises(ValueError):
+        await runner.resume_epic("does-not-exist")
+    await engine.dispose()
+
+
+async def test_resume_epic_without_persistence_raises(git_repo: Path):
+    adapter = _FilePerTaskAdapter()
+    scheduler = DynamicScheduler(ProtocolRouter({"gemini": adapter}), environ={})
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=scheduler, adapters={"gemini": adapter},
+        language="python", sandbox_runner=_AlwaysPassSandbox(),
+    )
+    with pytest.raises(ValueError):
+        await runner.resume_epic("whatever")
 
 
 async def test_epic_run_persists_accounting_rows(git_repo: Path, tmp_path: Path):

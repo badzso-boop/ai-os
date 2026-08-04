@@ -108,3 +108,34 @@ async def test_set_epic_status(tmp_path):
     await p.create_epic("E1", "t", "p", status="RUNNING")
     await p.set_epic_status("E1", "COMPLETED")
     assert (await p.epic_summaries())[0].status == "COMPLETED"
+
+
+async def test_get_epic_returns_none_for_missing(tmp_path):
+    p = await _open(tmp_path)
+    assert await p.get_epic("nope") is None
+    await p.create_epic("E1", "the title", "the prompt", status="RUNNING")
+    row = await p.get_epic("E1")
+    assert row is not None
+    assert row.id == "E1" and row.title == "the title" and row.status == "RUNNING"
+
+
+async def test_load_epic_tasks_reconstructs_tasknodes_and_status(tmp_path):
+    p = await _open(tmp_path)
+    await p.create_epic("E1", "t", "p")
+    task = TaskNode(
+        id="T1", title="ti", description="de", risk_level="HIGH",
+        target_files=["a.py", "b.py"], read_set={"c.py"}, write_set={"a.py"},
+        dependencies=["T0"], max_retries=5,
+    )
+    # T0 must exist as a task too for a realistic epic, but load doesn't validate
+    # deps — reconstruct fidelity is what we assert here.
+    await p.upsert_task(task, "E1", assigned_model="sonnet", status="COMPLETED")
+
+    loaded = await p.load_epic_tasks("E1")
+    assert len(loaded) == 1
+    node, status = loaded[0]
+    assert status == "COMPLETED"
+    assert node.id == "T1" and node.risk_level == "HIGH" and node.max_retries == 5
+    assert node.target_files == ["a.py", "b.py"]
+    assert node.read_set == {"c.py"} and node.write_set == {"a.py"}
+    assert node.dependencies == ["T0"]
