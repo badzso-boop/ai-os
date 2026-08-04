@@ -141,7 +141,7 @@ async def test_executor_writes_file_and_validates_via_dispatch(tmp_path: Path):
     assert sandbox.calls == 1
     # The 3 real MCP tools were offered to the model, and the model saw the model override.
     assert set(adapter.tool_names_offered) == {
-        "propose_file_patch", "fetch_symbol_definition", "trigger_sandbox_validation",
+        "propose_file_patch", "apply_file_edit", "fetch_symbol_definition", "trigger_sandbox_validation",
     }
     assert adapter.models_seen == ["gemini-flash"]
 

@@ -207,7 +207,7 @@ Closes the gap between "run one hand-specified task" (Phase 3b's `ai-os task run
 
 ## Phase 5 — how it actually works (in progress)
 
-Closes four of the deliberately-deferred gaps, in four independently-committed stages. **Stage 1 (multi-provider autonomous tool-calling) is done**; Stages 2–4 (diff-based patching, LockAudit/TokenCost persistence, adaptive rate-limit/cost-aware scheduling) are planned but not yet built. Same testing philosophy as every prior phase: no real LLM/network/Docker in the automated suite (fake tool-calling adapters scripting a tool-call-then-final-answer sequence, `httpx.MockTransport` for the adapter wire-format tests, real disposable git repos + fake sandbox); the real "a live model autonomously calls tools over its own API" run stays a manual `ai-os epic run` step.
+Closes four of the deliberately-deferred gaps, in four independently-committed stages. **Stages 1 (multi-provider autonomous tool-calling) and 2 (edit-based patching) are done**; Stages 3–4 (LockAudit/TokenCost persistence, adaptive rate-limit/cost-aware scheduling) are planned but not yet built. Same testing philosophy as every prior phase: no real LLM/network/Docker in the automated suite (fake tool-calling adapters scripting a tool-call-then-final-answer sequence, `httpx.MockTransport` for the adapter wire-format tests, real disposable git repos + fake sandbox); the real "a live model autonomously calls tools over its own API" run stays a manual `ai-os epic run` step.
 
 ### Stage 1 — Multi-provider autonomous tool-calling (implemented)
 
@@ -227,9 +227,16 @@ Wiring (in `task_runner.py` + `epic_runner.py`):
 
 Tests: `tests/test_gemini_tools.py`, `tests/test_openrouter_tools.py`, `tests/test_anthropic_tools.py` (per-adapter wire-format loops), `tests/test_tool_calling_executor.py` (a fake tool-calling adapter drives the real `dispatch` against a real worktree + fake sandbox — proves the bridge writes files and validates end-to-end, and that `EpicRunner` routes a `supports_tool_calling()` adapter through the tool loop, not the completion path).
 
-### Stages 2–4 — planned, not yet built
+### Stage 2 — Edit-based patching (implemented)
 
-- **Stage 2 — Diff/edit-based patching**: a new `apply_file_edit(filepath, old_string, new_string, replace_all)` MCP tool (search/replace edit blocks, Aider-style — NOT unified diffs) alongside `propose_file_patch`; completion + tool formats switch to edit blocks for existing files. Saves output tokens + fixes the "large files truncate" limitation.
+Search/replace edit blocks (Aider-style), NOT unified diffs — robust for LLMs and far cheaper than re-emitting a whole file.
+- **`mcp_server.apply_file_edit(filepath, old_string, new_string, replace_all=False)`** — a fourth MCP tool alongside `propose_file_patch`. Same worktree path-traversal guard; the file must already exist (use `propose_file_patch` to create); `old_string` must match exactly and, unless `replace_all`, uniquely — a zero-match, multi-match-without-`replace_all`, missing-file, or identical-strings case each comes back as an MCP tool *error* (not a crash), so the model gets a clear reason. Registered in `TOOL_DEFINITIONS` + `dispatch_tool_call`; both the Claude-CLI executor's `--allowedTools` and the tool-calling system prompt name it.
+- **Completion executor now speaks edit blocks too** (`task_runner.py`): the sentinel format gained an `<<<AI_OS_EDIT: path>>> / <<<AI_OS_SEARCH>>> / <<<AI_OS_REPLACE>>> / <<<AI_OS_END>>>` block for modifying existing files (preferred), keeping `<<<AI_OS_FILE>>>` for whole-file creation. `parse_agent_actions` scans **both** kinds in document order (an edit may follow a write to the same file); `_apply_edit_within_worktree` mirrors `apply_file_edit`'s exact/unique-match semantics, raising `AgentTurnError` on a bad edit so the retry loop feeds the model the reason. `parse_file_patches` is kept for the whole-file path/its tests. This lifts the earlier "large files truncate" limitation (the model re-sends only the changed snippet).
+
+Tests: `apply_file_edit` unit + dispatch-routing + real-round-trip tool-list in `test_mcp_server.py`; edit-block parsing (`parse_agent_actions` order), apply-to-existing-file, missing/ambiguous-search-raises, write-then-edit-same-file in `test_completion_executor.py`.
+
+### Stages 3–4 — planned, not yet built
+
 - **Stage 3 — LockAudit/TokenCost persistence**: new `ai_os/core/persistence.py` (thin async repo over `core/db/`), Epic/Task lifecycle rows, `AgentTurnExecutor` widened to return usage, best-effort/optional via an injected `session_factory`, `ai-os cost` / `ai-os epic history` CLI.
 - **Stage 4 — Adaptive rate-limit + cost-aware scheduling** (doc 02 §2.2): adapters surface a typed `RateLimitedError` on HTTP 429 (with `Retry-After`); a new `ai_os/core/scheduling_policy.py` adds exponential backoff + provider fallback (why risk→provider order is a list) + an optional `AI_OS_EPIC_BUDGET_USD` cap (reads Stage 3's TokenCost rows). Adaptive, NOT hardcoded TPM/RPM numbers.
 

@@ -7,7 +7,10 @@ import pytest
 from ai_os.core.task_runner import (
     AgentTurnContext,
     AgentTurnError,
+    _EditAction,
+    _WriteAction,
     build_completion_agent_turn_executor,
+    parse_agent_actions,
     parse_file_patches,
 )
 from ai_os.core.models import TaskNode
@@ -99,3 +102,75 @@ async def test_executor_includes_previous_output_on_retry(tmp_path):
     )
     await executor(ctx)
     assert "AssertionError: expected 5" in adapter.requests[0].context_payload
+
+
+# -- edit-block (search/replace) parsing + application (Stage 2) --------------
+
+
+def test_parse_agent_actions_write_block():
+    actions = parse_agent_actions("<<<AI_OS_FILE: a.py>>>\nA = 1\n<<<AI_OS_END>>>")
+    assert actions == [_WriteAction(path="a.py", content="A = 1")]
+
+
+def test_parse_agent_actions_edit_block():
+    text = (
+        "<<<AI_OS_EDIT: a.py>>>\n"
+        "<<<AI_OS_SEARCH>>>\n"
+        "old = 1\n"
+        "<<<AI_OS_REPLACE>>>\n"
+        "old = 2\n"
+        "<<<AI_OS_END>>>"
+    )
+    assert parse_agent_actions(text) == [_EditAction(path="a.py", search="old = 1", replace="old = 2")]
+
+
+def test_parse_agent_actions_preserves_document_order():
+    text = (
+        "<<<AI_OS_FILE: new.py>>>\nX = 1\n<<<AI_OS_END>>>\n"
+        "<<<AI_OS_EDIT: old.py>>>\n<<<AI_OS_SEARCH>>>\nq\n<<<AI_OS_REPLACE>>>\nr\n<<<AI_OS_END>>>"
+    )
+    actions = parse_agent_actions(text)
+    assert [type(a).__name__ for a in actions] == ["_WriteAction", "_EditAction"]
+    assert actions[0].path == "new.py" and actions[1].path == "old.py"
+
+
+async def test_executor_applies_edit_to_existing_file(tmp_path):
+    (tmp_path / "a.py").write_text("value = 1\nkeep = 9\n")
+    adapter = _CannedAdapter(
+        "<<<AI_OS_EDIT: a.py>>>\n<<<AI_OS_SEARCH>>>\nvalue = 1\n<<<AI_OS_REPLACE>>>\nvalue = 2\n<<<AI_OS_END>>>"
+    )
+    executor = build_completion_agent_turn_executor(adapter)
+    await executor(_ctx(tmp_path))
+    assert (tmp_path / "a.py").read_text() == "value = 2\nkeep = 9\n"
+
+
+async def test_executor_edit_missing_search_raises(tmp_path):
+    (tmp_path / "a.py").write_text("value = 1\n")
+    adapter = _CannedAdapter(
+        "<<<AI_OS_EDIT: a.py>>>\n<<<AI_OS_SEARCH>>>\nnope\n<<<AI_OS_REPLACE>>>\nx\n<<<AI_OS_END>>>"
+    )
+    executor = build_completion_agent_turn_executor(adapter)
+    with pytest.raises(AgentTurnError):
+        await executor(_ctx(tmp_path))
+
+
+async def test_executor_edit_on_missing_file_raises(tmp_path):
+    adapter = _CannedAdapter(
+        "<<<AI_OS_EDIT: ghost.py>>>\n<<<AI_OS_SEARCH>>>\na\n<<<AI_OS_REPLACE>>>\nb\n<<<AI_OS_END>>>"
+    )
+    executor = build_completion_agent_turn_executor(adapter)
+    with pytest.raises(AgentTurnError):
+        await executor(_ctx(tmp_path))
+
+
+async def test_executor_write_then_edit_same_file_in_order(tmp_path):
+    # A write creates the file, then an edit in the same turn modifies it.
+    adapter = _CannedAdapter(
+        "<<<AI_OS_FILE: a.py>>>\nx = 1\ny = 1\n<<<AI_OS_END>>>\n"
+        "<<<AI_OS_EDIT: a.py>>>\n<<<AI_OS_SEARCH>>>\ny = 1\n<<<AI_OS_REPLACE>>>\ny = 2\n<<<AI_OS_END>>>"
+    )
+    executor = build_completion_agent_turn_executor(adapter)
+    await executor(_ctx(tmp_path))
+    # The AI_OS_FILE parser strips the trailing newline before AI_OS_END, so the
+    # created file has no trailing "\n"; the edit then swaps y = 1 -> y = 2.
+    assert (tmp_path / "a.py").read_text() == "x = 1\ny = 2"

@@ -196,6 +196,59 @@ async def propose_file_patch(ctx: ToolContext, filepath: str, content: str, is_n
     return _text_result(f"SUCCESS: Patch applied to {filepath} in isolated worktree.")
 
 
+async def apply_file_edit(
+    ctx: ToolContext,
+    filepath: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+) -> types.CallToolResult:
+    """Search/replace edit of an existing file in the worktree (Aider-style,
+    not a unified diff): replace `old_string` with `new_string`.
+
+    Modelled on this repo's own Edit tool semantics — far more robust for LLMs
+    than line-numbered diffs, and far cheaper than re-emitting a whole file:
+    - `old_string` must occur EXACTLY, and by default UNIQUELY. A zero-match is
+      a tool error (the model's snapshot of the file is wrong); a multi-match
+      without `replace_all=True` is a tool error (ambiguous — which one?).
+    - `replace_all=True` replaces every occurrence (e.g. a rename).
+    - Same worktree path-traversal guard as `propose_file_patch`, and the file
+      must already exist (use `propose_file_patch` with `is_new_file` to create).
+    """
+    try:
+        target = _resolve_within_worktree(ctx.worktree_path, filepath)
+    except PathTraversalError as exc:
+        return _error_result(f"REJECTED: {exc}")
+
+    if not target.is_file():
+        return _error_result(
+            f"File not found in worktree: {filepath} (use propose_file_patch to create a new file)."
+        )
+    if old_string == new_string:
+        return _error_result("old_string and new_string are identical — nothing to change.")
+
+    original = target.read_text(encoding="utf-8")
+    count = original.count(old_string)
+    if count == 0:
+        return _error_result(
+            f"old_string not found in {filepath}. It must match the file's current "
+            "content exactly (including whitespace and indentation)."
+        )
+    if count > 1 and not replace_all:
+        return _error_result(
+            f"old_string is not unique in {filepath} ({count} occurrences). Provide "
+            "more surrounding context to make it unique, or pass replace_all=true."
+        )
+
+    updated = original.replace(old_string, new_string)
+    target.write_text(updated, encoding="utf-8")
+    replaced = count if replace_all else 1
+    return _text_result(
+        f"SUCCESS: Edited {filepath} ({replaced} occurrence"
+        f"{'s' if replaced != 1 else ''} replaced) in isolated worktree."
+    )
+
+
 async def fetch_symbol_definition(ctx: ToolContext, symbol_id: str) -> types.CallToolResult:
     """Looks up `symbol_id` (the `<relpath>::<QualifiedName>` FQN scheme from
     `ai_os.knowledge.graph_engine.KnowledgeEngine`) in the server's loaded
@@ -276,6 +329,39 @@ TOOL_DEFINITIONS: list[types.Tool] = [
         },
     ),
     types.Tool(
+        name="apply_file_edit",
+        description=(
+            "Make a targeted search/replace edit to an EXISTING file in the worktree: "
+            "replace an exact snippet (old_string) with new_string. Prefer this over "
+            "propose_file_patch for modifying files — it's far cheaper than re-sending "
+            "the whole file. old_string must match the current file content exactly and "
+            "uniquely (include surrounding context to disambiguate), unless replace_all "
+            "is true. Use propose_file_patch to create a brand-new file."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "filepath": {
+                    "type": "string",
+                    "description": "Path relative to the worktree root of the existing file to edit.",
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "The exact text to find and replace (must match uniquely unless replace_all).",
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "The replacement text.",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence of old_string (default false = require a unique match).",
+                },
+            },
+            "required": ["filepath", "old_string", "new_string"],
+        },
+    ),
+    types.Tool(
         name="fetch_symbol_definition",
         description=(
             "Look up a symbol's compressed skeleton stub in the project's Knowledge "
@@ -317,6 +403,8 @@ async def dispatch_tool_call(ctx: ToolContext, name: str, arguments: dict[str, o
     try:
         if name == "propose_file_patch":
             return await propose_file_patch(ctx, **arguments)
+        if name == "apply_file_edit":
+            return await apply_file_edit(ctx, **arguments)
         if name == "fetch_symbol_definition":
             return await fetch_symbol_definition(ctx, **arguments)
         if name == "trigger_sandbox_validation":

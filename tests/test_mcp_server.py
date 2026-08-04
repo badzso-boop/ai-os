@@ -21,6 +21,7 @@ from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.mcp_server import (
     ServerConfig,
     ToolContext,
+    apply_file_edit,
     dispatch_tool_call,
     fetch_symbol_definition,
     propose_file_patch,
@@ -141,6 +142,85 @@ async def test_propose_file_patch_rejects_absolute_path(tmp_path):
 
     assert result.is_error is True
     assert "REJECTED" in result.content[0].text
+
+
+# -- apply_file_edit -----------------------------------------------------------------
+
+
+async def test_apply_file_edit_replaces_unique_occurrence(tmp_path):
+    (tmp_path / "m.py").write_text("x = 1\ny = 2\n")
+    ctx = _ctx(tmp_path)
+    result = await apply_file_edit(ctx, "m.py", "y = 2", "y = 3")
+
+    assert result.is_error is False
+    assert "SUCCESS" in result.content[0].text
+    assert (tmp_path / "m.py").read_text() == "x = 1\ny = 3\n"
+
+
+async def test_apply_file_edit_missing_old_string_is_error(tmp_path):
+    (tmp_path / "m.py").write_text("x = 1\n")
+    ctx = _ctx(tmp_path)
+    result = await apply_file_edit(ctx, "m.py", "not_there", "z")
+
+    assert result.is_error is True
+    assert "not found" in result.content[0].text.lower()
+    assert (tmp_path / "m.py").read_text() == "x = 1\n"  # unchanged
+
+
+async def test_apply_file_edit_ambiguous_without_replace_all_is_error(tmp_path):
+    (tmp_path / "m.py").write_text("a = 0\na = 0\n")
+    ctx = _ctx(tmp_path)
+    result = await apply_file_edit(ctx, "m.py", "a = 0", "a = 1")
+
+    assert result.is_error is True
+    assert "not unique" in result.content[0].text.lower()
+    assert (tmp_path / "m.py").read_text() == "a = 0\na = 0\n"  # unchanged
+
+
+async def test_apply_file_edit_replace_all(tmp_path):
+    (tmp_path / "m.py").write_text("a = 0\na = 0\n")
+    ctx = _ctx(tmp_path)
+    result = await apply_file_edit(ctx, "m.py", "a = 0", "a = 1", replace_all=True)
+
+    assert result.is_error is False
+    assert "2 occurrences" in result.content[0].text
+    assert (tmp_path / "m.py").read_text() == "a = 1\na = 1\n"
+
+
+async def test_apply_file_edit_nonexistent_file_is_error(tmp_path):
+    ctx = _ctx(tmp_path)
+    result = await apply_file_edit(ctx, "nope.py", "a", "b")
+
+    assert result.is_error is True
+    assert "not found" in result.content[0].text.lower()
+
+
+async def test_apply_file_edit_rejects_traversal(tmp_path):
+    ctx = _ctx(tmp_path)
+    result = await apply_file_edit(ctx, "../escape.py", "a", "b")
+
+    assert result.is_error is True
+    assert "REJECTED" in result.content[0].text
+
+
+async def test_apply_file_edit_identical_strings_is_error(tmp_path):
+    (tmp_path / "m.py").write_text("a = 0\n")
+    ctx = _ctx(tmp_path)
+    result = await apply_file_edit(ctx, "m.py", "a = 0", "a = 0")
+
+    assert result.is_error is True
+    assert "identical" in result.content[0].text.lower()
+
+
+async def test_dispatch_apply_file_edit_routes_correctly(tmp_path):
+    (tmp_path / "m.py").write_text("v = 1\n")
+    ctx = _ctx(tmp_path)
+    result = await dispatch_tool_call(
+        ctx, "apply_file_edit", {"filepath": "m.py", "old_string": "v = 1", "new_string": "v = 2"}
+    )
+
+    assert result.is_error is False
+    assert (tmp_path / "m.py").read_text() == "v = 2\n"
 
 
 # -- fetch_symbol_definition ----------------------------------------------------------
@@ -318,6 +398,7 @@ async def test_real_stdio_protocol_round_trip(tmp_path):
             tool_names = {tool.name for tool in tools_result.tools}
             assert tool_names == {
                 "propose_file_patch",
+                "apply_file_edit",
                 "fetch_symbol_definition",
                 "trigger_sandbox_validation",
             }

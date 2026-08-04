@@ -241,8 +241,8 @@ def build_claude_cli_agent_turn_executor(
                 mcp_config_path,
                 "--strict-mcp-config",
                 "--allowedTools",
-                "mcp__ai_os__propose_file_patch mcp__ai_os__fetch_symbol_definition "
-                "mcp__ai_os__trigger_sandbox_validation",
+                "mcp__ai_os__propose_file_patch mcp__ai_os__apply_file_edit "
+                "mcp__ai_os__fetch_symbol_definition mcp__ai_os__trigger_sandbox_validation",
             ]
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -263,77 +263,179 @@ def build_claude_cli_agent_turn_executor(
 
 # -- completion-based agent turn (for providers WITHOUT autonomous tool use) -------
 
-# Sentinel-delimited file format the model is asked to emit. Deliberately NOT
+# Sentinel-delimited formats the model is asked to emit. Deliberately NOT
 # markdown code fences: fenced blocks collide with any code the model writes
 # that itself contains ``` (very common), which makes robust parsing
 # impossible. These sentinels are vanishingly unlikely to appear in real source.
+#
+# Two block kinds, mirroring the two MCP tools (Stage 2):
+#   AI_OS_FILE — whole-file write (creating a file, or a full rewrite).
+#   AI_OS_EDIT — targeted search/replace edit of an EXISTING file, so the model
+#     only re-sends the changed snippet, not the whole file — cutting output
+#     tokens dramatically on large files and lifting the "large files truncate"
+#     limitation the whole-file-only format had.
 _FILE_PATCH_RE = re.compile(
     r"<<<AI_OS_FILE:\s*(?P<path>.+?)\s*>>>\n(?P<content>.*?)\n?<<<AI_OS_END>>>",
+    re.DOTALL,
+)
+# One combined, position-ordered scan over both block kinds, so writes and edits
+# are applied in the exact order the model emitted them (an edit may target a
+# file an earlier block just wrote). The FILE branch is anchored on its own
+# `<<<AI_OS_FILE:` header and the EDIT branch on `<<<AI_OS_EDIT:`, so the two
+# never cross-match despite sharing the `<<<AI_OS_END>>>` terminator.
+_ACTION_RE = re.compile(
+    r"<<<AI_OS_FILE:\s*(?P<wpath>.+?)\s*>>>\n(?P<wcontent>.*?)\n?<<<AI_OS_END>>>"
+    r"|"
+    r"<<<AI_OS_EDIT:\s*(?P<epath>.+?)\s*>>>\n"
+    r"<<<AI_OS_SEARCH>>>\n(?P<search>.*?)\n?"
+    r"<<<AI_OS_REPLACE>>>\n?(?P<replace>.*?)\n?"
+    r"<<<AI_OS_END>>>",
     re.DOTALL,
 )
 
 COMPLETION_SYSTEM_PROMPT = (
     "You are a software engineering agent. You are given a task and compressed "
-    "context. Produce the COMPLETE new contents of every file you need to create "
-    "or modify. For each such file, output EXACTLY this block and nothing else "
-    "around it:\n"
+    "context. Emit your changes as sentinel-delimited blocks and NOTHING else "
+    "around them. Two block kinds:\n"
+    "\n"
+    "To EDIT an existing file (PREFER THIS — much cheaper than resending a whole "
+    "file), emit one block per edit with an EXACT snippet to find and its "
+    "replacement:\n"
+    "<<<AI_OS_EDIT: relative/path/from/repo/root.py>>>\n"
+    "<<<AI_OS_SEARCH>>>\n"
+    "<the exact current text to replace — must match uniquely, include enough "
+    "surrounding lines>\n"
+    "<<<AI_OS_REPLACE>>>\n"
+    "<the new text>\n"
+    "<<<AI_OS_END>>>\n"
+    "\n"
+    "To CREATE a new file (or fully rewrite one), emit its complete contents:\n"
     "<<<AI_OS_FILE: relative/path/from/repo/root.py>>>\n"
     "<the full file content>\n"
     "<<<AI_OS_END>>>\n"
-    "Rules: emit one block per file; paths are POSIX, relative to the repo root, "
-    "no leading './'; output the ENTIRE file content, not a diff or a snippet; do "
-    "not wrap blocks in markdown code fences; write no prose outside the blocks."
+    "\n"
+    "Rules: paths are POSIX, relative to the repo root, no leading './'; the "
+    "SEARCH text must match the file's current content EXACTLY (whitespace and "
+    "indentation included) and uniquely; do not wrap blocks in markdown code "
+    "fences; write no prose outside the blocks."
 )
 
 
 class AgentTurnError(RuntimeError):
     """An agent turn produced no usable result (e.g. the model returned no
-    parseable file blocks, or tried to write outside the worktree)."""
+    parseable file blocks, tried to write outside the worktree, or emitted an
+    edit whose search text didn't match the target file)."""
+
+
+@dataclass
+class _WriteAction:
+    path: str
+    content: str
+
+
+@dataclass
+class _EditAction:
+    path: str
+    search: str
+    replace: str
 
 
 def parse_file_patches(text: str) -> dict[str, str]:
-    """Parses the sentinel-delimited file blocks a completion agent emits into
-    `{relative_path: content}`. Returns an empty dict if none are present (the
-    caller decides whether that's an error)."""
+    """Parses the whole-file `<<<AI_OS_FILE>>>` blocks into `{relpath: content}`.
+    Kept for the whole-file path (and its existing tests); the executor uses the
+    richer `parse_agent_actions` (which also understands edit blocks)."""
     patches: dict[str, str] = {}
     for match in _FILE_PATCH_RE.finditer(text):
         patches[match.group("path").strip()] = match.group("content")
     return patches
 
 
-def _write_patch_within_worktree(worktree_path: Path, relpath: str, content: str) -> None:
-    """Writes `content` to `<worktree_path>/<relpath>`, rejecting any path that
-    escapes the worktree (same defense as the MCP server's `propose_file_patch`:
-    an absolute `relpath` makes `worktree / relpath` discard the root, which the
-    `is_relative_to` check then catches, as does a `..` traversal)."""
+def parse_agent_actions(text: str) -> list[_WriteAction | _EditAction]:
+    """Parses both whole-file writes and search/replace edits, in the order the
+    model emitted them. Returns an empty list if none are present (the caller
+    decides whether that's an error)."""
+    actions: list[_WriteAction | _EditAction] = []
+    for match in _ACTION_RE.finditer(text):
+        if match.group("wpath") is not None:
+            actions.append(
+                _WriteAction(path=match.group("wpath").strip(), content=match.group("wcontent"))
+            )
+        else:
+            actions.append(
+                _EditAction(
+                    path=match.group("epath").strip(),
+                    search=match.group("search"),
+                    replace=match.group("replace"),
+                )
+            )
+    return actions
+
+
+def _resolve_within_worktree(worktree_path: Path, relpath: str) -> Path:
+    """Resolves `<worktree_path>/<relpath>` and rejects any path that escapes
+    the worktree (same defense as the MCP server's tools: an absolute `relpath`
+    makes `worktree / relpath` discard the root, which the `is_relative_to`
+    check then catches, as does a `..` traversal)."""
     root = worktree_path.resolve()
     target = (worktree_path / relpath).resolve()
     if not target.is_relative_to(root):
         raise AgentTurnError(f"patch path {relpath!r} escapes the worktree root")
+    return target
+
+
+def _write_patch_within_worktree(worktree_path: Path, relpath: str, content: str) -> None:
+    """Writes `content` to `<worktree_path>/<relpath>`, creating parent dirs."""
+    target = _resolve_within_worktree(worktree_path, relpath)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
+
+
+def _apply_edit_within_worktree(worktree_path: Path, action: _EditAction) -> None:
+    """Applies a search/replace edit to an existing worktree file. Mirrors the
+    MCP `apply_file_edit` semantics: the search text must exist and (barring a
+    unique-by-construction match) be unambiguous — a zero- or multi-match is an
+    `AgentTurnError` so the retry loop feeds the model a clear reason."""
+    target = _resolve_within_worktree(worktree_path, action.path)
+    if not target.is_file():
+        raise AgentTurnError(
+            f"edit target {action.path!r} does not exist in the worktree "
+            "(use an AI_OS_FILE block to create a new file)"
+        )
+    original = target.read_text(encoding="utf-8")
+    count = original.count(action.search)
+    if count == 0:
+        raise AgentTurnError(
+            f"edit for {action.path!r}: search text not found (it must match the "
+            "file's current content exactly, including whitespace)"
+        )
+    if count > 1:
+        raise AgentTurnError(
+            f"edit for {action.path!r}: search text is not unique ({count} matches); "
+            "include more surrounding context"
+        )
+    target.write_text(original.replace(action.search, action.replace), encoding="utf-8")
 
 
 def build_completion_agent_turn_executor(
     adapter: BaseMCPAdapter, model: str | None = None
 ) -> AgentTurnExecutor:
     """Builds an `AgentTurnExecutor` for providers that DON'T support
-    autonomous MCP tool-calling (Gemini, OpenRouter, Anthropic API-key mode).
+    autonomous MCP tool-calling (e.g. a future/local adapter whose
+    `supports_tool_calling()` is False).
 
-    Instead of letting the model call `propose_file_patch` itself, this sends
-    the task + context + (on retries) the previous validation output as a plain
-    completion, asks for the full new content of each file to change in a
-    sentinel-delimited format, and AI-OS itself writes those files into the
+    Instead of letting the model call the MCP tools itself, this sends the task
+    + context + (on retries) the previous validation output as a plain
+    completion, asks for its changes as sentinel-delimited blocks — either a
+    search/replace `AI_OS_EDIT` (preferred for modifying files) or a whole-file
+    `AI_OS_FILE` (for new files) — and AI-OS itself applies them to the
     worktree. The existing `TaskRunner` sandbox-validation + retry-with-feedback
     loop then works identically — the only difference from the Anthropic-CLI
-    executor is *who* writes the files (AI-OS here, the model-driven tool call
-    there).
+    executor is *who* applies the changes (AI-OS here, the model-driven tool
+    call there).
 
-    Known limitation (flagged, doc'd in CLAUDE.md): asking for full file
-    contents means very large files can hit the model's output limit / get
-    truncated mid-file. Fine for the task sizes AI-OS targets (focused,
-    single-responsibility tasks per the DAG decomposition); a future diff-based
-    protocol would lift this, not built yet.
+    Stage 2 note: edit blocks fix the earlier whole-file-only limitation where
+    very large files could hit the model's output limit / truncate mid-file —
+    now the model only re-sends the changed snippet.
     """
 
     async def execute(ctx: AgentTurnContext) -> None:
@@ -341,7 +443,7 @@ def build_completion_agent_turn_executor(
             f"# Task: {ctx.task.title}",
             ctx.task.description,
             "",
-            f"## Files you are expected to write: {', '.join(ctx.task.target_files) or '(infer from the task)'}",
+            f"## Files you are expected to change: {', '.join(ctx.task.target_files) or '(infer from the task)'}",
             "",
             "## Compressed context (relevant symbols from the Knowledge Graph)",
             ctx.context_cache,
@@ -350,7 +452,7 @@ def build_completion_agent_turn_executor(
             prompt_parts += [
                 "",
                 f"## Attempt {ctx.attempt}: previous attempt's validation output (it FAILED)",
-                "Fix the code based on this output and re-emit the full corrected file(s).",
+                "Fix the code based on this output and re-emit the corrected block(s).",
                 ctx.previous_validation_output,
             ]
         request = LLMTaskRequest(
@@ -360,14 +462,17 @@ def build_completion_agent_turn_executor(
             model=model,
         )
         response = await adapter.execute_task(request)
-        patches = parse_file_patches(response.generated_text)
-        if not patches:
+        actions = parse_agent_actions(response.generated_text)
+        if not actions:
             raise AgentTurnError(
                 f"agent turn for task {ctx.task.id!r} produced no parseable file blocks "
                 f"(model={response.model_name})"
             )
-        for relpath, content in patches.items():
-            _write_patch_within_worktree(ctx.worktree_path, relpath, content)
+        for action in actions:
+            if isinstance(action, _WriteAction):
+                _write_patch_within_worktree(ctx.worktree_path, action.path, action.content)
+            else:
+                _apply_edit_within_worktree(ctx.worktree_path, action)
 
     return execute
 
@@ -378,8 +483,11 @@ TOOL_CALLING_SYSTEM_PROMPT = (
     "You are a software engineering agent working inside an isolated git "
     "worktree. You have tools to do your job — use them, do not just describe "
     "changes in prose:\n"
-    "  - propose_file_patch(filepath, content, is_new_file): write the full new "
-    "contents of a file into the worktree.\n"
+    "  - apply_file_edit(filepath, old_string, new_string, replace_all): make a "
+    "targeted search/replace edit to an EXISTING file — prefer this for "
+    "modifying files (much cheaper than resending the whole file).\n"
+    "  - propose_file_patch(filepath, content, is_new_file): write the full "
+    "contents of a file — use this to CREATE a new file.\n"
     "  - fetch_symbol_definition(symbol_id): look up a symbol's skeleton from the "
     "Knowledge Graph by its '<relpath>::<QualifiedName>' FQN.\n"
     "  - trigger_sandbox_validation(): run the build/test suite against the "
