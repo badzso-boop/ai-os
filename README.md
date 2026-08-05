@@ -128,7 +128,7 @@ cd ai-os
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # 2. Run the test suite (real Docker containers; never makes a real LLM/network call)
-.venv/bin/pytest -q          # 352 tests (345 passed + 6 skipped opt-in + 1 documented xfail), ~53s
+.venv/bin/pytest -q          # 358 tests (351 passed + 6 skipped opt-in + 1 documented xfail), ~55s
 
 # 3. One-time: build the sandbox image used to validate Python tasks
 #    (bakes pytest in, since the sandbox runs with --network none)
@@ -231,7 +231,7 @@ ai-os task run my-project \
 
 ### F. Run a full epic — decompose & distribute across models (⚠️ real usage + Docker)
 
-Decomposes a high-level request into a task DAG, shows the proposed plan (HITL plan-review gate), then executes it — routing each task to a model by risk, letting tool-capable providers autonomously call the MCP tools, validating every change in the sandbox, and recording spend.
+Decomposes a high-level request into a task DAG, shows the proposed plan (HITL plan-review gate) — **including a rough per-task token/USD estimate for the configured models** so you can gauge spend before approving (Anthropic session tasks show `sub` = subscription usage) — then executes it, routing each task to a model by risk, letting tool-capable providers autonomously call the MCP tools, validating every change in the sandbox, and recording spend.
 
 **By default it opens a pull request**: the epic's tasks are gathered on a per-epic integration branch (`ai-os/epic-<id>`) and one PR is opened via the `gh` CLI. Pass `--merge-to-main` to merge directly instead. If there's no git remote or `gh`, PR mode falls back to a local merge so nothing is lost.
 

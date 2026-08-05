@@ -21,6 +21,7 @@ from ai_os.core.epic_planner import EpicPlanError, decompose
 from ai_os.core.epic_runner import EpicRunner
 from ai_os.core.lock_manager import LockManager
 from ai_os.core.conventions import load_project_conventions
+from ai_os.core.cost_estimator import estimate_epic
 from ai_os.core.models import TaskNode
 from ai_os.core.persistence import Persistence, default_db_url
 from ai_os.core.scheduler import DynamicScheduler
@@ -431,7 +432,8 @@ def epic() -> None:
     distributing tasks across models by risk level (Phase 4a)."""
 
 
-def _print_plan_table(tasks, assignments) -> None:
+def _print_plan_table(tasks, assignments, estimate=None) -> None:
+    est_by_id = {e.task_id: e for e in estimate.per_task} if estimate is not None else {}
     table = Table(title="Proposed DAG plan")
     table.add_column("ID")
     table.add_column("Risk")
@@ -439,14 +441,44 @@ def _print_plan_table(tasks, assignments) -> None:
     table.add_column("Depends on")
     table.add_column("Writes")
     table.add_column("Title")
+    if estimate is not None:
+        table.add_column("~tok (in/out)")
+        table.add_column("~$", justify="right")
     for t in tasks:
         a = assignments[t.id]
         model = a.model or "(provider default)"
-        table.add_row(
+        row = [
             t.id, t.risk_level, f"{a.provider} → {model}",
             ", ".join(t.dependencies) or "-", ", ".join(sorted(t.write_set)) or "-", t.title,
-        )
+        ]
+        if estimate is not None:
+            e = est_by_id.get(t.id)
+            if e is None:
+                row += ["-", "-"]
+            else:
+                row += [
+                    f"{e.input_tokens // 1000}K/{e.output_tokens // 1000}K",
+                    "sub" if e.usd is None else f"${e.usd:.3f}",
+                ]
+        table.add_row(*row)
     console.print(table)
+
+    if estimate is not None:
+        total_k = (estimate.total_input_tokens + estimate.total_output_tokens) / 1000
+        console.print(
+            f"[bold]Estimated usage[/bold] [dim](rough — real usage varies ±2-3× with retries/tool loops)[/dim]: "
+            f"~{estimate.total_input_tokens // 1000}K in + {estimate.total_output_tokens // 1000}K out "
+            f"(~{total_k:.0f}K total)"
+        )
+        notes = []
+        if estimate.total_usd > 0:
+            notes.append(f"~${estimate.total_usd:.2f} on metered providers")
+        if estimate.has_subscription:
+            notes.append("Anthropic session tasks = subscription (included usage, no $)")
+        if estimate.has_unpriced:
+            notes.append("some models unpriced")
+        if notes:
+            console.print("  " + "  ·  ".join(notes))
 
 
 def _make_event_printer(verbose: bool):
@@ -558,7 +590,11 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
         repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
     )
     assignments = prelim.plan_assignments(tasks)
-    _print_plan_table(tasks, assignments)
+    try:
+        estimate = estimate_epic(tasks, engine, scheduler, adapters)
+    except Exception:
+        estimate = None  # estimation is best-effort; never block the run on it
+    _print_plan_table(tasks, assignments, estimate)
 
     # HITL Stage 1: Plan Review gate (doc 12 §2.1). The React UI version is
     # Phase 4b; the approval gate itself works fine in a terminal.
