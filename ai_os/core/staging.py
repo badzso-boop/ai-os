@@ -259,6 +259,28 @@ class GitStagingEngine:
         that push/inspect a BLOCKED task's preserved branch)."""
         return self._branch_name(task_id)
 
+    async def worktree_changes(self, task_id: str) -> Tuple[List[str], str]:
+        """Return `(changed_files, unified_diff)` for the task's worktree vs its
+        base — i.e. what the agent actually changed this task, before it's merged.
+
+        Used by the validator-quality checks (test-presence assessment + the
+        cheap-model critic). Implemented with a non-destructive `git add -A -N`
+        (intent-to-add) so brand-new untracked files show up in `git diff` too,
+        without staging their content (the real commit still happens later in
+        `stage_and_merge_task`'s own `git add .`). Best-effort: returns
+        `([], "")` on any git error rather than breaking the run."""
+        wt_path = self._worktree_path(task_id)
+        try:
+            await self._run_git(["add", "-A", "-N"], wt_path, check=False)
+            _, names_out, _ = await self._run_git(
+                ["diff", "--name-only"], wt_path, check=False
+            )
+            _, diff_out, _ = await self._run_git(["diff"], wt_path, check=False)
+        except OSError:
+            return [], ""
+        files = [ln.strip() for ln in names_out.splitlines() if ln.strip()]
+        return files, diff_out
+
     async def abandon_task(self, task_id: str) -> None:
         """Explicit terminal-cleanup path for a task being permanently given
         up on (max retries exhausted, HITL-aborted, etc.) — the only other

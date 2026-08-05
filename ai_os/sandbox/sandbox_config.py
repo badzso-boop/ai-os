@@ -43,6 +43,28 @@ class SandboxConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class CoverageConfig:
+    """A code-coverage gate for the validation run (Phase 6, feature 1b). When
+    present, AI-OS enforces a minimum coverage threshold so an agent can't pass
+    validation with weak/absent tests — a change with no exercising test drops
+    coverage and fails the gate, feeding the agent a "add tests" signal on retry.
+
+    `min_percent` is the fail-under threshold. `paths` are the packages/dirs to
+    measure (default: the whole project). For Python (the out-of-the-box case)
+    AI-OS wraps the default `pytest` command with `pytest-cov`
+    (`--cov=<path> --cov-fail-under=<min>`); for Node/Java, set your own
+    coverage-producing `test_command` (see the README) — the threshold is
+    advisory metadata there."""
+
+    min_percent: float = 0.0
+    paths: tuple[str, ...] = ()
+
+    @property
+    def enabled(self) -> bool:
+        return self.min_percent > 0.0
+
+
+@dataclass(frozen=True)
 class DatabaseService:
     image: str = "postgres:16"
     hostname: str = "db"
@@ -57,6 +79,8 @@ class SandboxConfig:
     env: dict[str, str] = field(default_factory=dict)
     setup_commands: tuple[str, ...] = ()
     test_command: str | None = None
+    # Optional coverage gate (Phase 6). `None` = no coverage enforcement.
+    coverage: CoverageConfig | None = None
     # Override the language profile's base image — e.g. point at a Playwright
     # image (`mcr.microsoft.com/playwright:...`) so `setup_commands` can install
     # browsers and `test_command` can run e2e tests. `None` = the profile default.
@@ -114,12 +138,26 @@ def parse_sandbox_config(data: object) -> SandboxConfig:
     if image is not None and not isinstance(image, str):
         raise SandboxConfigError("'image' must be a string")
 
+    coverage = None
+    raw_cov = data.get("coverage")
+    if raw_cov is not None:
+        if not isinstance(raw_cov, dict):
+            raise SandboxConfigError("'coverage' must be an object")
+        min_pct = raw_cov.get("min_percent", 0)
+        if not isinstance(min_pct, (int, float)) or isinstance(min_pct, bool):
+            raise SandboxConfigError("coverage.min_percent must be a number")
+        raw_paths = raw_cov.get("paths") or []
+        if not isinstance(raw_paths, list) or not all(isinstance(p, str) for p in raw_paths):
+            raise SandboxConfigError("coverage.paths must be a list of strings")
+        coverage = CoverageConfig(min_percent=float(min_pct), paths=tuple(raw_paths))
+
     return SandboxConfig(
         database=database,
         env=_as_str_map(data.get("env"), "env"),
         setup_commands=tuple(setup),
         test_command=test_command,
         image=image,
+        coverage=coverage,
     )
 
 

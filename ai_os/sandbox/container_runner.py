@@ -235,6 +235,32 @@ def build_docker_argv(
     return argv
 
 
+def build_coverage_command(language: str, base_command: str, coverage) -> str | None:
+    """Wrap a base test command with a coverage gate (Phase 6, feature 1b), or
+    return `None` when AI-OS can't safely wrap this language/command (Node/Java, or
+    a custom non-pytest Python command) — in which case the base command runs
+    unchanged and the threshold is advisory.
+
+    Out-of-the-box support is Python + `pytest` (the sandbox image bakes in
+    `pytest-cov`): we insert `--cov=<path> --cov-report=term-missing
+    --cov-fail-under=<min>` so pytest itself fails the run when coverage drops
+    below the threshold — turning "no test exercises this change" into a
+    validation failure the agent must fix, not a silently-passing green."""
+    if coverage is None or not getattr(coverage, "enabled", False):
+        return None
+    stripped = base_command.strip()
+    if language == "python" and stripped.split()[:1] == ["pytest"]:
+        paths = coverage.paths or (".",)
+        cov_args = " ".join(f"--cov={p}" for p in paths)
+        return (
+            f"{stripped} {cov_args} --cov-report=term-missing "
+            f"--cov-fail-under={coverage.min_percent:g}"
+        )
+    # Node/Java (and custom Python commands) own their own coverage tooling —
+    # AI-OS won't guess how to instrument them, so the threshold is advisory.
+    return None
+
+
 class SandboxLanguageNotSupportedError(ValueError):
     """Raised when `run_validation` is asked to validate a language with no
     entry in `SANDBOX_PROFILES`.
@@ -321,10 +347,12 @@ class EphemeralSandboxRunner:
         try:
             if config is not None and config.needs_database:
                 return await self._run_with_database(
-                    worktree, profile, image, config, mount=mount, default_command=default_command
+                    worktree, profile, image, config, mount=mount,
+                    default_command=default_command, language=language,
                 )
             return await self._run_isolated(
-                worktree, profile, image, config, mount=mount, default_command=default_command
+                worktree, profile, image, config, mount=mount,
+                default_command=default_command, language=language,
             )
         finally:
             if profile.isolation == "copy":
@@ -337,13 +365,29 @@ class EphemeralSandboxRunner:
 
     # -- run phases ----------------------------------------------------------
 
+    def _effective_command(
+        self, profile: SandboxProfile, config, default_command: str | None, language: str
+    ) -> str | None:
+        """The test command to run: a `.ai-os/sandbox.json` `test_command`
+        override, else the language default (`None` -> the profile's own
+        command), wrapped with the coverage gate when one is configured (Phase 6,
+        feature 1b)."""
+        command = config.test_command if config is not None and config.test_command else default_command
+        cov = getattr(config, "coverage", None) if config is not None else None
+        if cov is not None and getattr(cov, "enabled", False):
+            base = command if command is not None else profile.command
+            wrapped = build_coverage_command(language, base, cov)
+            if wrapped is not None:
+                return wrapped
+        return command
+
     async def _run_isolated(
         self, worktree_path: Path, profile: SandboxProfile, image: str, config,
-        *, mount: bool, default_command: str | None,
+        *, mount: bool, default_command: str | None, language: str,
     ) -> ValidationResult:
         """The default flow: a fully network-isolated (`--network none`)
         container. Honors an optional (DB-less) `.ai-os/sandbox.json`'s env,
-        setup_commands, and test_command override."""
+        setup_commands, test_command override, and coverage gate."""
         extra_env = tuple(config.env.items()) if config is not None else ()
         if config is not None and config.setup_commands:
             setup = await self._run_phase(
@@ -353,7 +397,7 @@ class EphemeralSandboxRunner:
             )
             if not setup.success:
                 return _as_setup_failure(setup)
-        command = (config.test_command if config is not None and config.test_command else default_command)
+        command = self._effective_command(profile, config, default_command, language)
         return await self._run_phase(
             worktree_path, profile, image, network="none", extra_env=extra_env,
             command=command, timeout=self.timeout_seconds, mount=mount,
@@ -361,7 +405,7 @@ class EphemeralSandboxRunner:
 
     async def _run_with_database(
         self, worktree_path: Path, profile: SandboxProfile, image: str, config,
-        *, mount: bool, default_command: str | None,
+        *, mount: bool, default_command: str | None, language: str,
     ) -> ValidationResult:
         """DB-backed flow: bring up a Postgres (or other) sidecar on a fresh
         `--internal` network (no internet), run the setup/seed commands, then the
@@ -385,7 +429,7 @@ class EphemeralSandboxRunner:
                 )
                 if not setup.success:
                     return _as_setup_failure(setup)
-            command = config.test_command if config.test_command else default_command
+            command = self._effective_command(profile, config, default_command, language)
             return await self._run_phase(
                 worktree_path, profile, image, network=running.network, extra_env=extra_env,
                 command=command, timeout=self.timeout_seconds, mount=mount,

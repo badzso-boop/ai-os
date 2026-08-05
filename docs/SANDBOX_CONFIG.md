@@ -33,6 +33,33 @@ at test time.
 | `setup_commands` | Commands run (DB reachable, internet not) before the tests: migrations + your reference-data seed. |
 | `test_command` | Overrides the language default test command (optional). |
 | `image` | Overrides the language profile's base image (optional) — e.g. point at a Playwright image so `setup_commands` can install browsers and `test_command` can run e2e tests. |
+| `coverage.min_percent` | Minimum coverage % — fails the validation run below it (optional; `0`/absent = off). |
+| `coverage.paths` | Packages/dirs to measure (optional; default = whole project). |
+
+## Coverage gate (`coverage`)
+
+A code-coverage threshold that hardens validation against weak/absent tests: a
+change with no exercising test drops coverage and **fails the sandbox run**, so
+the agent must add real tests on retry instead of shipping untested code.
+
+```json
+{ "coverage": { "min_percent": 80, "paths": ["src"] } }
+```
+
+- **Python (out-of-the-box):** AI-OS wraps the default `pytest` command with
+  `--cov=<path> --cov-report=term-missing --cov-fail-under=<min>` (`pytest-cov`
+  is baked into the sandbox image). If you set your own non-pytest
+  `test_command`, add coverage flags to it yourself.
+- **Node / Java:** these own their coverage tooling, so AI-OS treats the
+  threshold as advisory — set a coverage-producing `test_command` (e.g. Vitest
+  with a `coverage.thresholds` in its config, or the JaCoCo `check` goal) and it
+  fails the run itself.
+
+Separately from the gate, **every completed task** gets an advisory
+validator-quality readout in the PR body (*🔎 Validator quality*): whether it
+changed code without adding a test, whether it touched CI/sensitive config, and
+a cheap-model verdict on whether its tests meaningfully exercise the change.
+These never block a merge — they point the human reviewer at what to check.
 
 ## Project conventions (`.ai-os/conventions.md`)
 

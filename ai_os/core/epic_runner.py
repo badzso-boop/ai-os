@@ -41,6 +41,7 @@ from ai_os.core.task_runner import (
     AgentTurnExecutor,
     TaskRunner,
     TaskRunResult,
+    _extract_critic_verdict as _critic_verdict,
     build_claude_cli_agent_turn_executor,
     build_completion_agent_turn_executor,
     build_tool_calling_agent_turn_executor,
@@ -113,6 +114,7 @@ class EpicRunner:
         pr_base_branch: str = "main",
         on_event: Optional[Callable[[dict], None]] = None,
         summarizer: Optional[Callable] = None,
+        test_critic: Optional[Callable] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.scheduler = scheduler
@@ -136,6 +138,10 @@ class EpicRunner:
         self.project_conventions = load_project_conventions(self.repo_root)
         # Optional cheap-model summarizer for large validation failure logs.
         self.summarizer = summarizer
+        # Optional cheap-model test critic (Phase 6, feature 1c): judges test
+        # quality on each COMPLETED task's diff. Advisory — surfaced in the PR
+        # body for the human reviewer, never blocks a merge.
+        self.test_critic = test_critic
         # Optional accounting (Stage 3). When set, the epic + a row per task are
         # created up front (the audit tables FK to them), and each TaskRunner
         # records token cost + lock audit + status against those rows.
@@ -240,6 +246,7 @@ class EpicRunner:
             on_event=self.on_event,
             project_conventions=self.project_conventions,
             summarize_output=self.summarizer,
+            test_critic=self.test_critic,
         )
         return await runner.run_task(task, language=resolve_task_language(task, self.language))
 
@@ -400,6 +407,45 @@ class EpicRunner:
 
         return result
 
+    def _build_quality_section(self, result: EpicRunResult) -> list[str]:
+        """The '🔎 Validator quality' block of the PR body — a per-task readout of
+        the advisory checks (test-presence + CI/sensitive flags + the cheap-model
+        critic's verdict), so the human reviewer knows where to look hardest.
+        Returns [] when nothing noteworthy surfaced (all tasks tested + strong)."""
+        rows: list[str] = []
+        for tid in result.completed:
+            tr = result.task_results.get(tid)
+            if tr is None:
+                continue
+            presence = tr.test_presence
+            flags: list[str] = []
+            if presence is not None and presence.missing_tests:
+                flags.append("⚠️ code changed but **no test** was added")
+            if presence is not None and presence.sensitive_files:
+                flags.append(
+                    "🔐 touches CI/sensitive config (a green result here is **not "
+                    "self-certifying** — review the diff): "
+                    + ", ".join(f"`{p}`" for p in presence.sensitive_files)
+                )
+            if tr.test_critique:
+                verdict = _critic_verdict(tr.test_critique)
+                if verdict in {"WEAK", "MISSING", "UNKNOWN"}:
+                    icon = {"WEAK": "⚠️", "MISSING": "⛔", "UNKNOWN": "❔"}[verdict]
+                    first = tr.test_critique.strip().splitlines()
+                    detail = " ".join(ln.strip() for ln in first[1:4]).strip()
+                    flags.append(f"{icon} test critic: **{verdict}** — {detail or '(see run log)'}")
+            if flags:
+                rows.append(f"- **{tid}**: " + "; ".join(flags))
+        if not rows:
+            return []
+        return [
+            "",
+            "### 🔎 Validator quality (advisory — the sandbox is the pass/fail authority)",
+            "These completed tasks warrant a closer human look:",
+            "",
+            *rows,
+        ]
+
     async def _finalize_pr(self, result: EpicRunResult, tasks: list[TaskNode]) -> None:
         """Open a PR from the integration branch (base = pr_base_branch), or fall
         back to a local ff-merge into pr_base_branch when there's no git remote
@@ -476,6 +522,13 @@ class EpicRunner:
                 out = ((task_result.final_output if task_result else "") or "").strip()
                 tail = "\n".join(out.splitlines()[-15:]) or "(no validation output captured)"
                 lines += ["", f"**{tid}** — inspect branch `{branch}`. Last validation output:", "```", tail, "```"]
+
+        # Validator-quality section (Phase 6): surface, for the human reviewer,
+        # where a completed task shipped code without tests, touched CI/sensitive
+        # config, or drew a weak/missing verdict from the cheap-model test critic.
+        quality_lines = self._build_quality_section(result)
+        if quality_lines:
+            lines += quality_lines
 
         lines += [
             "",

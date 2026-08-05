@@ -100,6 +100,7 @@ The first four phases of the planned architecture are **implemented, tested, and
 | **3b** | Ephemeral Docker sandbox & MCP tool server | ✅ done |
 | **4a** | Epic decomposition & multi-model distribution | ✅ done |
 | **5** | Multi-provider autonomous tool-calling, edit-based patching, cost/lock accounting, adaptive scheduling | ✅ done |
+| **6** | Validator-quality assessment (test-presence, coverage gate, cheap-model test critic) | ✅ done |
 | **4b** | Glass Box UI (React) & full 3-stage HITL web flow | ⛔ not built |
 
 The system works **end-to-end from the command line today**: give it a high-level request, it decomposes the work into a task DAG, routes each task to a model by risk, lets the model autonomously call tools to edit code, validates every change in a sandbox, and **opens a pull request** (or merges to `main` with `--merge-to-main`) — recording token/USD spend along the way. See `CLAUDE.md` for the per-phase "how it actually works" detail and the documented trade-offs/limitations.
@@ -111,6 +112,7 @@ The system works **end-to-end from the command line today**: give it a high-leve
 - **Live observability** — the CLI streams what each task is doing (attempt, routed model + tokens, sandbox pass/fail with output, retries, merges); `-v` shows full logs.
 - **Resilience & cost control** — a usage/rate-limit blocks just that task (the PR still finalizes the completed ones), a cheap model summarizes large failure logs before the expensive one retries, adaptive 429 backoff + provider fallback, and an optional per-epic USD cap.
 - **Operational hardening** — a cross-run lock stops two epics clobbering the same repo; a task touching CI/secrets/`.ai-os` config is flagged at plan-review and can't be blind-merged to main (it goes through a reviewable PR); a crashed epic *resumes on its existing branch* (keeping completed work); and a BLOCKED task **keeps its branch + surfaces the error in the PR body** so you can see why it failed instead of the code vanishing.
+- **Validator-quality guards** — because "the tests pass" can be gamed with weak/absent tests, each completed task is checked for whether it shipped **code without a test**, whether it touched **CI/sensitive config** (a green result there isn't self-certifying), and — via a cheap model — whether its tests **meaningfully exercise the change** (`STRONG`/`WEAK`/`MISSING`). All three surface in the PR body's *🔎 Validator quality* section for the human reviewer. An optional **coverage gate** (`.ai-os/sandbox.json` `"coverage"`) makes pytest itself fail below a threshold, turning "no test exercises this change" into a validation failure the agent must fix.
 - **Crash resume** — `ai-os epic resume` re-runs only the not-yet-completed tasks of a crashed epic.
 
 ---

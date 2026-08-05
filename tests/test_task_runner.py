@@ -154,6 +154,106 @@ async def test_reports_status_transitions(git_repo: Path):
     assert statuses == [("TASK-1", "RUNNING"), ("TASK-1", "COMPLETED")]
 
 
+def _make_multi_file_executor(files: dict[str, str]):
+    """A fake executor that writes a fixed set of {relpath: content} files into
+    the worktree — used to drive the validator-quality (test-presence) checks."""
+
+    async def execute(ctx: AgentTurnContext) -> None:
+        for relpath, content in files.items():
+            target = ctx.worktree_path / relpath
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+
+    return execute
+
+
+async def test_completed_task_flags_missing_tests(git_repo: Path):
+    staging = GitStagingEngine(git_repo)
+    runner = TaskRunner(
+        lock_manager=LockManager(),
+        staging=staging,
+        knowledge_engine=KnowledgeEngine(),
+        agent_turn_executor=_make_multi_file_executor({"src/service.py": "def f():\n    return 1\n"}),
+        sandbox_runner=_ScriptedSandboxRunner(fail_count=0),
+    )
+    result = await runner.run_task(_task(target_files=["src/service.py"]), language="python")
+
+    assert result.status == "COMPLETED"
+    assert result.test_presence is not None
+    assert result.test_presence.missing_tests is True
+    assert "src/service.py" in result.changed_files
+
+
+async def test_completed_task_with_test_not_flagged(git_repo: Path):
+    staging = GitStagingEngine(git_repo)
+    runner = TaskRunner(
+        lock_manager=LockManager(),
+        staging=staging,
+        knowledge_engine=KnowledgeEngine(),
+        agent_turn_executor=_make_multi_file_executor({
+            "src/service.py": "def f():\n    return 1\n",
+            "tests/test_service.py": "from src.service import f\n\ndef test_f():\n    assert f() == 1\n",
+        }),
+        sandbox_runner=_ScriptedSandboxRunner(fail_count=0),
+    )
+    result = await runner.run_task(_task(), language="python")
+
+    assert result.status == "COMPLETED"
+    assert result.test_presence is not None
+    assert result.test_presence.missing_tests is False
+
+
+async def test_test_critic_is_invoked_on_success(git_repo: Path):
+    staging = GitStagingEngine(git_repo)
+    critic_calls: list[str] = []
+
+    async def fake_critic(diff: str) -> str:
+        critic_calls.append(diff)
+        return "VERDICT: WEAK\n- the test never calls the changed function"
+
+    events: list[dict] = []
+    runner = TaskRunner(
+        lock_manager=LockManager(),
+        staging=staging,
+        knowledge_engine=KnowledgeEngine(),
+        agent_turn_executor=_make_multi_file_executor({"src/service.py": "def f():\n    return 1\n"}),
+        sandbox_runner=_ScriptedSandboxRunner(fail_count=0),
+        test_critic=fake_critic,
+        on_event=events.append,
+    )
+    result = await runner.run_task(_task(), language="python")
+
+    assert result.status == "COMPLETED"
+    assert len(critic_calls) == 1  # exactly one critic call, on the successful merge
+    assert "src/service.py" in critic_calls[0]  # the diff was passed
+    assert result.test_critique.startswith("VERDICT: WEAK")
+    critique_events = [e for e in events if e.get("type") == "test_critique"]
+    assert critique_events and critique_events[0]["verdict"] == "WEAK"
+
+
+async def test_test_critic_not_invoked_when_blocked(git_repo: Path):
+    staging = GitStagingEngine(git_repo)
+    calls: list[str] = []
+
+    async def fake_critic(diff: str) -> str:
+        calls.append(diff)
+        return "VERDICT: STRONG"
+
+    runner = TaskRunner(
+        lock_manager=LockManager(),
+        staging=staging,
+        knowledge_engine=KnowledgeEngine(),
+        agent_turn_executor=_make_multi_file_executor({"src/service.py": "x = 1\n"}),
+        sandbox_runner=_ScriptedSandboxRunner(fail_count=999),
+        test_critic=fake_critic,
+    )
+    result = await runner.run_task(_task(max_retries=0), language="python")
+
+    assert result.status == "BLOCKED"
+    assert calls == []  # never critiqued a task that didn't pass validation
+    assert result.test_critique is None
+
+
 async def test_reports_blocked_status_on_exhaustion(git_repo: Path):
     staging = GitStagingEngine(git_repo)
     statuses: list[tuple[str, str]] = []

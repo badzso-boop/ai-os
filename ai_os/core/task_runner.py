@@ -29,7 +29,7 @@ import asyncio
 import json
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
@@ -37,6 +37,7 @@ from ai_os.core.conventions import conventions_block
 from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
 from ai_os.core.staging import GitStagingEngine
+from ai_os.core.test_quality import TestPresenceReport, assess_test_presence
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import (
     BaseMCPAdapter,
@@ -74,6 +75,14 @@ class TaskRunResult:
     status: str  # "COMPLETED" | "BLOCKED"
     attempts: int
     final_output: str | None = None
+    # Validator-quality signals for a COMPLETED task (Phase 6). `test_presence`
+    # is the deterministic classification of what the task changed (source vs
+    # test); `test_critique` is the optional cheap-model judgement on test
+    # quality. Both are advisory — surfaced to the human in the CLI + PR body,
+    # never a hard block (the sandbox is the pass/fail authority).
+    test_presence: Optional[TestPresenceReport] = None
+    test_critique: Optional[str] = None
+    changed_files: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -128,12 +137,20 @@ class TaskRunner:
         project_conventions: str = "",
         summarize_output: Optional[Callable[[str], Awaitable[str]]] = None,
         summarize_threshold: int = 2000,
+        test_critic: Optional[Callable[[str], Awaitable[str]]] = None,
+        assess_test_quality: bool = True,
     ) -> None:
         # Optional cheap-model summarizer for large validation failure logs — see
         # `build_output_summarizer`. Only invoked when the output exceeds
         # `summarize_threshold` chars, so short errors skip the extra call.
         self.summarize_output = summarize_output
         self.summarize_threshold = summarize_threshold
+        # Validator-quality checks (Phase 6). `assess_test_quality` (default on)
+        # runs the zero-LLM test-presence classification on a COMPLETED task's
+        # real diff; `test_critic` (optional, cheap-model) adds a judgement on
+        # whether the tests meaningfully exercise the change. Both are advisory.
+        self.test_critic = test_critic
+        self.assess_test_quality = assess_test_quality
         self.project_conventions = project_conventions
         self.lock_manager = lock_manager
         self.staging = staging
@@ -202,6 +219,43 @@ class TaskRunner:
 
         return audit
 
+    async def _assess_validator_quality(
+        self, task: TaskNode, changed_files: list[str], diff: str
+    ) -> tuple[Optional[TestPresenceReport], Optional[str]]:
+        """Run the advisory validator-quality checks on a COMPLETED task's real
+        diff: the deterministic test-presence classification (always, cheap) and
+        the optional cheap-model test critic. Emits observability events and
+        returns `(presence_report, critique_text)`. Never raises into the run —
+        a check failure just yields `None` for that signal."""
+        presence: Optional[TestPresenceReport] = None
+        critique: Optional[str] = None
+        if self.assess_test_quality:
+            try:
+                presence = assess_test_presence(changed_files)
+                self._emit(
+                    type="test_quality", task_id=task.id,
+                    source_files=list(presence.source_files),
+                    test_files=list(presence.test_files),
+                    sensitive_files=list(presence.sensitive_files),
+                    missing_tests=presence.missing_tests,
+                    summary=presence.summary_line(),
+                )
+            except Exception:
+                presence = None
+        if self.test_critic is not None and diff.strip():
+            try:
+                critique = await self.test_critic(diff[:_TEST_CRITIC_DIFF_CAP])
+                if critique and critique.strip():
+                    self._emit(
+                        type="test_critique", task_id=task.id,
+                        verdict=_extract_critic_verdict(critique), critique=critique.strip(),
+                    )
+                else:
+                    critique = None
+            except Exception:
+                critique = None
+        return presence, critique
+
     async def run_task(self, task: TaskNode, language: str, max_hops: int = 2) -> TaskRunResult:
         async with self.lock_manager.locks(
             task.id, task.read_set, task.write_set, audit=self._lock_audit_callback(task.id)
@@ -213,6 +267,8 @@ class TaskRunner:
             )
 
             last_output: str | None = None
+            last_changed_files: list[str] = []
+            last_diff: str = ""
             max_attempts = task.max_retries + 1
             attempt = 0
             for attempt in range(1, max_attempts + 1):
@@ -260,6 +316,14 @@ class TaskRunner:
                         )
                     )
 
+                # Snapshot what the agent has changed in the worktree so far (for
+                # the validator-quality checks if this attempt merges). Captured
+                # BEFORE the merge tears the worktree down; best-effort.
+                try:
+                    last_changed_files, last_diff = await self.staging.worktree_changes(task.id)
+                except Exception:
+                    last_changed_files, last_diff = [], ""
+
                 validator_ran = False
 
                 async def validator(wt_path: Path) -> bool:
@@ -280,8 +344,13 @@ class TaskRunner:
                 if merged:
                     self._emit(type="merged", task_id=task.id, attempt=attempt)
                     await self._report_status(task.id, "COMPLETED")
+                    presence, critique = await self._assess_validator_quality(
+                        task, last_changed_files, last_diff
+                    )
                     return TaskRunResult(
-                        task_id=task.id, status="COMPLETED", attempts=attempt, final_output=last_output
+                        task_id=task.id, status="COMPLETED", attempts=attempt,
+                        final_output=last_output, test_presence=presence,
+                        test_critique=critique, changed_files=last_changed_files,
                     )
                 if not validator_ran:
                     # stage_and_merge_task returned False before the validator
@@ -355,6 +424,72 @@ def build_output_summarizer(
         return text or output
 
     return summarize
+
+
+# -- validator-quality: cheap-model test critic (Phase 6, feature 1c) -------------
+
+# Cap the diff we hand the critic so a huge change can't blow the cheap model's
+# context / cost. The head of a diff (the code + first tests) is the most telling.
+_TEST_CRITIC_DIFF_CAP = 12000
+
+TEST_CRITIC_SYSTEM_PROMPT = (
+    "You are a senior engineer reviewing the TEST QUALITY of a code change, given "
+    "its git diff. The change already passed its test suite — your job is to judge "
+    "whether those tests are meaningful, because an automated agent may have "
+    "written weak or tautological tests just to make the suite green.\n"
+    "\n"
+    "Assess ONLY test quality, not code style. Look for: (a) is there a test at all "
+    "for the new/changed behavior? (b) do the tests actually call the changed code "
+    "with meaningful inputs and assert on real outputs/effects — or are they "
+    "tautological (assert True, asserting a mock returns what it was told to, "
+    "asserting a constant equals itself, no assertions)? (c) are the important "
+    "edge/error cases covered?\n"
+    "\n"
+    "Respond in this exact shape, and be terse:\n"
+    "VERDICT: STRONG | WEAK | MISSING\n"
+    "then at most 4 short bullet lines ('- ...') naming the concrete gap(s), or a "
+    "single '- tests meaningfully exercise the change' line if STRONG. No preamble."
+)
+
+
+def _extract_critic_verdict(text: str) -> str:
+    """Pull the STRONG/WEAK/MISSING token out of the critic's reply for the
+    structured event; falls back to 'UNKNOWN' if the model didn't follow format."""
+    for line in text.splitlines():
+        stripped = line.strip().upper()
+        if stripped.startswith("VERDICT:"):
+            token = stripped.split(":", 1)[1].strip().split()[0] if ":" in stripped else ""
+            if token in {"STRONG", "WEAK", "MISSING"}:
+                return token
+    upper = text.upper()
+    for token in ("MISSING", "WEAK", "STRONG"):
+        if token in upper:
+            return token
+    return "UNKNOWN"
+
+
+def build_test_critic(
+    adapter: BaseMCPAdapter, model: str | None = None
+) -> Callable[[str], Awaitable[str]]:
+    """Build a cheap-model 'test critic': given a completed task's git diff, it
+    judges whether the tests meaningfully exercise the change (vs weak/tautological
+    /absent tests an agent may have written just to pass validation). Wired to a
+    LOW-risk (cheap) provider+model by the CLI, and run only AFTER a task passes
+    the sandbox — so it's one extra cheap call per completed task, never on the
+    hot retry path. Advisory only: its verdict is surfaced to the human reviewer
+    in the PR body, it does not block the merge."""
+
+    async def critique(diff: str) -> str:
+        request = LLMTaskRequest(
+            task_id="test-critic",
+            system_prompt=TEST_CRITIC_SYSTEM_PROMPT,
+            context_payload="Git diff of the change under review:\n\n" + diff,
+            model=model,
+        )
+        response = await adapter.execute_task(request)
+        return (response.generated_text or "").strip()
+
+    return critique
 
 
 def build_claude_cli_agent_turn_executor(
@@ -544,7 +679,17 @@ COMPLETION_SYSTEM_PROMPT = (
     "installs those before running the tests. If your change alters the "
     "database schema, also update the schema migration AND the reference-data "
     "seed the sandbox runs (the seed script named in .ai-os/sandbox.json's "
-    "setup_commands, or a new seed migration) so the DB-backed tests still pass."
+    "setup_commands, or a new seed migration) so the DB-backed tests still pass.\n"
+    "\n"
+    "TESTS ARE MANDATORY, NOT OPTIONAL: for any behavior you add or change, add or "
+    "update a real test that calls the changed code with meaningful inputs and "
+    "asserts on real outputs/effects — never a tautological test (assert True, "
+    "asserting a mock returns what you told it to) written just to make the suite "
+    "green. A code change with no accompanying test is flagged for human review.\n"
+    "You MAY also add CI workflow files (e.g. .github/workflows/ci.yml) so the "
+    "project is complete and self-testing — but such files run with the repo's "
+    "real secrets after merge, so they are always routed to human PR review, never "
+    "auto-merged; keep them honest (run the real build + tests, do not weaken them)."
 )
 
 
@@ -732,7 +877,14 @@ TOOL_CALLING_SYSTEM_PROMPT = (
     "tests, so an unlisted dependency will make validation fail. Likewise, if you "
     "change the database schema, update the schema migration AND the "
     "reference-data seed the sandbox runs (the seed named in .ai-os/sandbox.json's "
-    "setup_commands, or a new seed migration) so the DB-backed tests still pass."
+    "setup_commands, or a new seed migration) so the DB-backed tests still pass.\n"
+    "TESTS ARE MANDATORY: for any behavior you add or change, add/update a real "
+    "test that exercises the changed code with meaningful inputs and asserts on "
+    "real outputs — never a tautological test written just to pass validation (a "
+    "code change with no test is flagged for human review). You MAY also add CI "
+    "workflow files (.github/workflows/) to make the project complete and "
+    "self-testing; those are always routed to human PR review (they run with the "
+    "repo's real secrets after merge), so keep them honest — never weaken them."
 )
 
 

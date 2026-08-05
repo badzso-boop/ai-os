@@ -17,5 +17,10 @@
 # this base that pip-installs requirements.txt WITH network (phase 1), then runs
 # the tests against it with --network none (phase 2). So this base only needs
 # pytest baked in; the rest comes from the project's manifest at task time.
+# pytest-cov is baked in too so the optional coverage gate
+# (.ai-os/sandbox.json "coverage") works offline: AI-OS wraps the default
+# pytest command with `--cov ... --cov-fail-under=<min>` (see
+# container_runner.build_coverage_command), and pytest-cov must already be
+# present since phase-2 validation has no network to install it.
 FROM python:3.12-slim
-RUN pip install --no-cache-dir pytest
+RUN pip install --no-cache-dir pytest pytest-cov

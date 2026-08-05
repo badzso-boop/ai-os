@@ -35,6 +35,7 @@ from ai_os.core.task_runner import (
     TaskRunner,
     build_claude_cli_agent_turn_executor,
     build_output_summarizer,
+    build_test_critic,
 )
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.knowledge.watcher import ProjectWatcher
@@ -660,6 +661,23 @@ def _make_event_printer(verbose: bool):
             console.print(f"  [yellow]↻ {tid} retrying (attempt {ev.get('next_attempt')})[/yellow]")
         elif t == "merged":
             console.print(f"  [green]✓ {tid} merged[/green]")
+        elif t == "test_quality":
+            if ev.get("missing_tests"):
+                console.print(f"  [yellow]⚠ {tid} no test added for a code change[/yellow]")
+            if ev.get("sensitive_files"):
+                console.print(
+                    f"  [yellow]🔐 {tid} touches CI/sensitive config[/yellow] — "
+                    f"{', '.join(ev['sensitive_files'])} [dim](not self-certifying — review the diff)[/dim]"
+                )
+        elif t == "test_critique":
+            verdict = ev.get("verdict", "UNKNOWN")
+            color = {"STRONG": "green", "WEAK": "yellow", "MISSING": "red"}.get(verdict, "yellow")
+            console.print(f"  [{color}]🔎 {tid} test critic: {verdict}[/{color}]")
+            if verdict not in {"STRONG"} and verbose:
+                console.print(Panel(
+                    (ev.get("critique") or "").strip(), title=f"{tid} test critique",
+                    border_style=color, expand=False,
+                ))
 
     return printer
 
@@ -769,8 +787,12 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
     try:
         low = scheduler.assign("LOW")
         summarizer = build_output_summarizer(adapters[low.provider], low.model)
+        # Cheap-model test critic (feature 1c): one extra cheap call per COMPLETED
+        # task, judging test quality on its diff — surfaced in the PR body.
+        test_critic = build_test_critic(adapters[low.provider], low.model)
     except Exception:
         summarizer = None  # no LOW provider configured -> skip summarization
+        test_critic = None
 
     async def _execute():
         # Accounting (Stage 3): persist epic + per-task rows + token/lock audit
@@ -780,6 +802,7 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
             repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
             sandbox_runner=EphemeralSandboxRunner(),
             summarizer=summarizer,
+            test_critic=test_critic,
             # Terminal states only — the attempt/validation events (on_event)
             # cover the in-flight detail, so RUNNING would just be noise.
             on_status_change=lambda tid, status: (
@@ -881,11 +904,20 @@ def epic_resume(name_or_path: str, epic_id: str, language: str, merge_to_main: b
     router = ProtocolRouter(adapters, risk_provider_order=risk_provider_order_from_env())
     scheduler = DynamicScheduler(router)
 
+    try:
+        low = scheduler.assign("LOW")
+        summarizer = build_output_summarizer(adapters[low.provider], low.model)
+        test_critic = build_test_critic(adapters[low.provider], low.model)
+    except Exception:
+        summarizer = test_critic = None
+
     async def _resume():
         persistence, engine = await Persistence.open(default_db_url())
         runner = EpicRunner(
             repo_root=root, scheduler=scheduler, adapters=adapters, language=language,
             sandbox_runner=EphemeralSandboxRunner(),
+            summarizer=summarizer,
+            test_critic=test_critic,
             on_status_change=lambda tid, status: (
                 console.print(f"[dim]{tid}: {status}[/dim]") if status != "RUNNING" else None
             ),
