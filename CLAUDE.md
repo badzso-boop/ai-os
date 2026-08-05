@@ -38,6 +38,8 @@ cp .env.example .env         # fill in whichever provider credentials you have
 ```
 No `mypy`/`flake8`/`npm test`/`tsc` configured yet.
 
+**Worked examples** live in `examples/`: `create_full_project.sh` (scaffold a full FastAPI+React project from zero → coverage gate → scan → optional end-to-end epic) and `openrouter-multimodel.env` (OpenRouter with a different model per risk level, via `AI_OS_MODEL_OPENROUTER_<RISK>` + `AI_OS_PROVIDER_ORDER_<RISK>`). Both verified: the deterministic path of the script runs verbatim; the epic steps are gated behind `RUN_EPIC=1` since they cost real usage.
+
 ## What AI-OS is (full vision, drives Phase 2+ design)
 
 **AI-OS** is a planned **AI Software Engineering Orchestrator** — not a coding assistant or IDE plugin. It acts like an operating system kernel that schedules and supervises AI coding agents (Claude, GPT, Gemini, DeepSeek, local Ollama/vLLM models) as interchangeable "execution cores," while a fully deterministic Python core handles everything that doesn't require AI judgement.

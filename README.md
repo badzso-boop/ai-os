@@ -162,6 +162,8 @@ ai-os --help
 
 AI-OS has two kinds of commands: **deterministic, zero-LLM analysis** (free, offline) and **agentic execution** (makes real LLM calls, consumes real usage/quota). They are clearly separated below.
 
+> **Worked examples** live in **[`examples/`](examples/)**: [`create_full_project.sh`](examples/create_full_project.sh) scaffolds a complete FastAPI + React project from zero and (optionally) builds a feature end-to-end; [`openrouter-multimodel.env`](examples/openrouter-multimodel.env) configures OpenRouter with a different model per risk level.
+
 ### A0. Start a new project from zero — `ai-os init`
 
 Scaffold a working baseline (source + a passing test + a wired `.ai-os/sandbox.json`), make it a git repo with an initial `main` commit, and register it — so `ai-os epic run` can build on it immediately. Deterministic (no network / host toolchain at init time).
