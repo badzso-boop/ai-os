@@ -129,7 +129,7 @@ cd ai-os
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # 2. Run the test suite (real Docker containers; never makes a real LLM/network call)
-.venv/bin/pytest -q          # 395 tests (388 passed + 6 skipped opt-in + 1 documented xfail), ~52s
+.venv/bin/pytest -q          # 399 tests (392 passed + 6 skipped opt-in + 1 documented xfail), ~55s
 
 # 3. One-time: build the sandbox image used to validate Python tasks
 #    (bakes pytest in, since the sandbox runs with --network none)
@@ -231,6 +231,16 @@ Watching /path/to/project (every 1.0s). Initial scan in 0.42s: 128 nodes, 210 ed
 Press Ctrl-C to stop.
 14:03:11 re-scanned (+1 files) -> 130 nodes, 214 edges, graph updated
 14:03:25 re-scanned (~1 files) -> 130 nodes, 215 edges, graph updated
+```
+
+### C2. Reclaim disk after crashes — `ai-os clean`
+
+AI-OS tears down its sandbox containers/networks on exit, but a hard crash (OOM/SIGKILL) can't — and per-task dependency images accumulate. `ai-os clean` removes AI-OS's own Docker artifacts (only objects matching its naming, never anything else). With a project path it also prunes stale git worktrees; `--branches` deletes leftover `ai-os/*` branches too. Run it when no epic is active.
+
+```bash
+ai-os clean --dry-run                    # show what would be removed
+ai-os clean --yes                        # remove leaked images/containers/networks
+ai-os clean my-project --branches --yes  # also prune worktrees + delete ai-os/* branches
 ```
 
 ### D. Test a provider (⚠️ real LLM call, consumes usage)

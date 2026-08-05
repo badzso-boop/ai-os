@@ -53,6 +53,73 @@ def main() -> None:
     """AI-OS — deterministic Polyglot Analyzer & Knowledge Graph (Phase 1)."""
 
 
+@main.command("clean")
+@click.argument("name_or_path", required=False)
+@click.option("--branches", is_flag=True, help="Also delete leftover ai-os/* branches (DISCARDS blocked/unmerged work) — needs a project path.")
+@click.option("--dry-run", is_flag=True, help="Show what would be removed, remove nothing.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+def clean(name_or_path: str | None, branches: bool, dry_run: bool, yes: bool) -> None:
+    """Reclaim disk/state AI-OS left behind — especially after a crash.
+
+    Removes AI-OS's own Docker artifacts (per-task dependency/copy images, leaked
+    sandbox containers, DB sidecar networks) — only objects matching AI-OS's
+    naming, never anything else. With a project path it also prunes stale git
+    worktrees; add --branches to delete leftover ai-os/* branches too. Run this
+    when no `ai-os epic` is active (it doesn't take the run lock).
+    """
+    from ai_os.core import cleaner
+
+    art = cleaner.list_docker_artifacts()
+    repo = None
+    stale_branches: list[str] = []
+    if name_or_path:
+        try:
+            repo = registry.resolve(name_or_path)
+        except registry.ProjectPathError as exc:
+            raise click.ClickException(str(exc)) from exc
+        stale_branches = cleaner.list_ai_os_branches(repo)
+
+    console.print("[bold]AI-OS cleanup[/bold]")
+    console.print(f"  Docker images:     {len(art.images)}")
+    for x in art.images:
+        console.print(f"    [dim]{x}[/dim]")
+    console.print(f"  Docker containers: {len(art.containers)}")
+    for x in art.containers:
+        console.print(f"    [dim]{x}[/dim]")
+    console.print(f"  Docker networks:   {len(art.networks)}")
+    for x in art.networks:
+        console.print(f"    [dim]{x}[/dim]")
+    if repo is not None:
+        console.print(f"  Git worktrees:     prune stale registrations in {repo}")
+        if branches:
+            console.print(f"  [yellow]ai-os/* branches:  {len(stale_branches)} (will be DELETED — discards blocked/unmerged work)[/yellow]")
+            for b in stale_branches:
+                console.print(f"    [yellow]{b}[/yellow]")
+
+    nothing = art.is_empty() and repo is None
+    if nothing:
+        console.print("\nNothing to clean. ✨")
+        return
+    if dry_run:
+        console.print("\n[dim]--dry-run: nothing removed.[/dim]")
+        return
+    if not yes and not click.confirm("\nRemove the above?", default=False):
+        console.print("Aborted — nothing removed.")
+        return
+
+    removed = cleaner.remove_docker_artifacts(art)
+    if repo is not None:
+        cleaner.prune_worktrees(repo)
+        removed.append(f"pruned stale worktrees in {repo}")
+        if branches and stale_branches:
+            deleted = cleaner.delete_branches(repo, stale_branches)
+            removed += [f"branch {b}" for b in deleted]
+
+    console.print(f"\n[green]Removed {len(removed)} item(s).[/green]")
+    for item in removed:
+        console.print(f"  [dim]{item}[/dim]")
+
+
 @main.command("init")
 @click.argument("path", type=click.Path(file_okay=False))
 @click.option("--stack", required=True, type=click.Choice(PRESETS), help="Project template to scaffold.")
