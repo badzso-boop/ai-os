@@ -287,7 +287,7 @@ class EphemeralSandboxRunner:
             )
 
         try:
-            config = load_sandbox_config(Path(worktree_path))
+            config = load_sandbox_config(Path(worktree_path), language=language)
         except SandboxConfigError as exc:
             feedback = build_feedback(
                 success=False, exit_code=1, raw_output=f"Invalid .ai-os/sandbox.json: {exc}"

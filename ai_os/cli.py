@@ -5,6 +5,7 @@ request into a multi-task DAG distributed across models (Phase 4a)."""
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ from ai_os.core.lock_manager import LockManager
 from ai_os.core.conventions import load_project_conventions
 from ai_os.core.cost_estimator import estimate_epic
 from ai_os.core.models import TaskNode
+from ai_os.core.scaffold import PRESETS, write_scaffold
 from ai_os.core.persistence import Persistence, default_db_url
 from ai_os.core.scheduler import DynamicScheduler
 from ai_os.core.scheduling_policy import SchedulingPolicy
@@ -47,6 +49,64 @@ _LANGUAGE_CHOICES = sorted(["python", "javascript", "typescript", "java"])
 @click.group()
 def main() -> None:
     """AI-OS — deterministic Polyglot Analyzer & Knowledge Graph (Phase 1)."""
+
+
+@main.command("init")
+@click.argument("path", type=click.Path(file_okay=False))
+@click.option("--stack", required=True, type=click.Choice(PRESETS), help="Project template to scaffold.")
+@click.option("--name", default=None, help="Registry name to register the project under (default: the dir name).")
+def init(path: str, stack: str, name: str | None) -> None:
+    """Scaffold a NEW project from zero at PATH (a working baseline + tests +
+    `.ai-os/sandbox.json`), make it a git repo with an initial `main` commit, and
+    register it — so `ai-os epic run` can build on it immediately.
+
+    Deterministic: templates are written directly (no network / host toolchain).
+    For the `fastapi-react` monorepo, run epics per language (`--language python`
+    for the backend, `--language typescript` for the frontend).
+    """
+    root = Path(path).resolve()
+    try:
+        written = write_scaffold(root, stack)
+    except FileExistsError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    # Make it a git repo with a `main` commit (AI-OS branches worktrees off main).
+    def _git(*args: str) -> None:
+        result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise click.ClickException(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+
+    if not (root / ".git").exists():
+        _git("init", "-b", "main")
+    _git("add", ".")
+    # Use the machine's configured identity, but fall back to a local one when
+    # none is set, so the initial commit never fails on a fresh box.
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True)
+    if status.stdout.strip():
+        identity: list[str] = []
+        who = subprocess.run(["git", "config", "user.email"], cwd=root, capture_output=True, text=True)
+        if not who.stdout.strip():
+            identity = ["-c", "user.email=ai-os@localhost", "-c", "user.name=AI-OS"]
+        commit = subprocess.run(
+            ["git", *identity, "commit", "-m", f"Scaffold {stack} project (ai-os init)"],
+            cwd=root, capture_output=True, text=True,
+        )
+        if commit.returncode != 0:
+            raise click.ClickException(f"git commit failed: {commit.stderr.strip()}")
+
+    reg_name = name or root.name
+    registry.add(reg_name, str(root), force=True)
+
+    console.print(f"[green]Scaffolded[/green] a [bold]{stack}[/bold] project at {root}")
+    for rel in written:
+        console.print(f"  [dim]created[/dim] {rel}")
+    console.print(f"\nRegistered as [bold]{reg_name}[/bold]. Next:")
+    if stack == "fastapi-react":
+        console.print(f"  ai-os epic run {reg_name} --prompt \"add a /users CRUD API with tests\" --language python")
+        console.print(f"  ai-os epic run {reg_name} --prompt \"add a users list page\" --language typescript")
+    else:
+        lang = "python" if stack == "fastapi" else "typescript"
+        console.print(f"  ai-os epic run {reg_name} --prompt \"...\" --language {lang}")
 
 
 @main.group()

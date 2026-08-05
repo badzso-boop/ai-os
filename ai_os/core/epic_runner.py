@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from ai_os.analyzer.call_graph_builder import CallGraphBuilder
+from ai_os.analyzer.languages import detect_language
 from ai_os.core import planner
 from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
@@ -75,6 +76,26 @@ class EpicRunResult:
     merged_to_main: bool = False
     # The original high-level prompt (for the PR title/body); empty on resume.
     raw_prompt: str = ""
+
+
+def resolve_task_language(task: TaskNode, default_language: str) -> str:
+    """The language a task validates as. Explicit `task.language` wins; else it's
+    derived from the task's file extensions (majority vote across write_set +
+    target_files); else the epic's default. This is what lets ONE epic span a
+    Python backend + a TypeScript frontend — each task gets its own sandbox
+    profile."""
+    if task.language:
+        return task.language
+    from pathlib import Path as _P
+
+    votes: dict[str, int] = {}
+    for path in list(task.write_set) + list(task.target_files):
+        lang = detect_language(_P(path))
+        if lang is not None:
+            votes[lang] = votes.get(lang, 0) + 1
+    if votes:
+        return max(votes, key=votes.get)
+    return default_language
 
 
 class EpicRunner:
@@ -171,6 +192,7 @@ class EpicRunner:
         self, task: TaskNode, assignment: Assignment, engine: KnowledgeEngine, graph_json_path: Path
     ) -> AgentTurnExecutor:
         adapter = self.adapters[assignment.provider]
+        language = resolve_task_language(task, self.language)
         # Three execution paths, most-specific first:
         # 1. Anthropic CLI-session — the `claude` CLI owns its own MCP tool loop
         #    (spawned as a subprocess via --mcp-config).
@@ -178,7 +200,7 @@ class EpicRunner:
             return build_claude_cli_agent_turn_executor(
                 repo_root=self.repo_root,
                 graph_json_path=graph_json_path,
-                sandbox_language=self.language,
+                sandbox_language=language,
                 model=assignment.model or "claude-sonnet-4-5",
                 claude_cli=getattr(adapter, "claude_cli", "claude"),
             )
@@ -191,7 +213,7 @@ class EpicRunner:
                 model=assignment.model,
                 knowledge_engine=engine,
                 sandbox_runner=self.sandbox_runner or EphemeralSandboxRunner(),
-                sandbox_language=self.language,
+                sandbox_language=language,
             )
         # 3. Fallback — completion write-back (model returns whole files, AI-OS
         #    writes them). For adapters without a tool-calling loop.
@@ -219,7 +241,7 @@ class EpicRunner:
             project_conventions=self.project_conventions,
             summarize_output=self.summarizer,
         )
-        return await runner.run_task(task, language=self.language)
+        return await runner.run_task(task, language=resolve_task_language(task, self.language))
 
     async def _epic_over_budget(self, epic_id: Optional[str]) -> bool:
         """True if a cost cap is configured and the epic's recorded spend has

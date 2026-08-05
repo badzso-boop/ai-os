@@ -128,7 +128,7 @@ cd ai-os
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # 2. Run the test suite (real Docker containers; never makes a real LLM/network call)
-.venv/bin/pytest -q          # 358 tests (351 passed + 6 skipped opt-in + 1 documented xfail), ~55s
+.venv/bin/pytest -q          # 372 tests (365 passed + 6 skipped opt-in + 1 documented xfail), ~52s
 
 # 3. One-time: build the sandbox image used to validate Python tasks
 #    (bakes pytest in, since the sandbox runs with --network none)
@@ -158,6 +158,25 @@ ai-os --help
 ## 🚀 Usage
 
 AI-OS has two kinds of commands: **deterministic, zero-LLM analysis** (free, offline) and **agentic execution** (makes real LLM calls, consumes real usage/quota). They are clearly separated below.
+
+### A0. Start a new project from zero — `ai-os init`
+
+Scaffold a working baseline (source + a passing test + a wired `.ai-os/sandbox.json`), make it a git repo with an initial `main` commit, and register it — so `ai-os epic run` can build on it immediately. Deterministic (no network / host toolchain at init time).
+
+```bash
+ai-os init ./myapp --stack fastapi-react --name myapp   # FastAPI backend + React frontend monorepo
+ai-os init ./api   --stack fastapi                      # Python backend only
+ai-os init ./web   --stack react                        # Vite + React + TS frontend only
+```
+
+For the monorepo, run epics **per language** (one epic can also span both — each task validates with its own sandbox profile, derived from its file extensions):
+
+```bash
+ai-os epic run myapp --prompt "add a /users CRUD API with tests" --language python
+ai-os epic run myapp --prompt "add a users list page calling the API" --language typescript
+```
+
+> **Sweet spot vs. from-scratch.** AI-OS shines on **incremental changes to an existing codebase** (the Context Cache grounds it in real code, the sandbox validates against real tests). `ai-os init` gives you a working baseline so you get that benefit immediately instead of hand-building scaffolding.
 
 ### A. Register projects
 

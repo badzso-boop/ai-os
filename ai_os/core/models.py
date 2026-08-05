@@ -34,6 +34,11 @@ class TaskNode(BaseModel):
     status: TaskStatus = "PENDING"
     max_retries: int = 3
     retry_count: int = 0
+    # Per-task language (python/typescript/javascript/java), letting one epic
+    # span e.g. a Python backend + a TypeScript frontend — each task validates
+    # with its own sandbox profile. `None` -> derived from the task's file
+    # extensions, falling back to the epic's default language.
+    language: str | None = None
 
     @model_validator(mode="after")
     def _read_write_disjoint(self) -> "TaskNode":

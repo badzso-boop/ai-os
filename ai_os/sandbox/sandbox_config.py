@@ -123,10 +123,24 @@ def parse_sandbox_config(data: object) -> SandboxConfig:
     )
 
 
-def load_sandbox_config(worktree_path: Path) -> SandboxConfig | None:
+def load_sandbox_config(worktree_path: Path, language: str | None = None) -> SandboxConfig | None:
     """Load `<worktree>/.ai-os/sandbox.json` if present, else `None`. Raises
-    `SandboxConfigError` if the file exists but is malformed (so a typo surfaces
-    clearly rather than silently disabling the DB)."""
+    `SandboxConfigError` if the file exists but is malformed.
+
+    Multi-language monorepos can key config per language under a top-level
+    `languages` map, e.g.::
+
+        {
+          "languages": {
+            "python":     { "test_command": "cd backend && pytest" },
+            "typescript": { "setup_commands": ["cd frontend && pnpm prisma generate"],
+                            "test_command": "cd frontend && pnpm typecheck" }
+          }
+        }
+
+    When `language` is given and present under `languages`, its sub-config is
+    merged over the top-level fields (top-level acts as shared defaults). If
+    there's no `languages` map, the flat config applies to every task."""
     path = Path(worktree_path) / CONFIG_RELPATH
     if not path.is_file():
         return None
@@ -134,4 +148,20 @@ def load_sandbox_config(worktree_path: Path) -> SandboxConfig | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise SandboxConfigError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SandboxConfigError("sandbox config root must be a JSON object")
+
+    per_language = data.get("languages")
+    if per_language is not None:
+        if not isinstance(per_language, dict):
+            raise SandboxConfigError("'languages' must be an object of language -> config")
+        shared = {k: v for k, v in data.items() if k != "languages"}
+        if language is not None and language in per_language:
+            sub = per_language[language]
+            if not isinstance(sub, dict):
+                raise SandboxConfigError(f"languages.{language} must be an object")
+            return parse_sandbox_config({**shared, **sub})
+        # A task in a language the map doesn't cover falls back to shared defaults
+        # (or None when there are none) — so it isn't accidentally DB-validated.
+        return parse_sandbox_config(shared) if shared else None
     return parse_sandbox_config(data)
