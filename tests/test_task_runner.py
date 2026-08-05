@@ -111,7 +111,7 @@ async def test_succeeds_on_second_attempt_matching_doc16_acceptance_criterion(gi
     assert executor.calls[1].previous_validation_output == "attempt 1 failed"
 
 
-async def test_exhausts_retries_and_abandons_worktree(git_repo: Path):
+async def test_exhausts_retries_removes_worktree_but_keeps_branch(git_repo: Path):
     staging = GitStagingEngine(git_repo)
     runner = TaskRunner(
         lock_manager=LockManager(),
@@ -126,15 +126,16 @@ async def test_exhausts_retries_and_abandons_worktree(git_repo: Path):
     assert result.attempts == 2  # max_retries=1 -> 2 total attempts
     assert result.final_output == "attempt 2 failed"
 
-    # abandon_task must have actually torn the worktree/branch down.
+    # The worktree DIRECTORY is torn down...
     wt_list = subprocess.run(
         ["git", "worktree", "list"], cwd=git_repo, check=True, capture_output=True, text=True
     ).stdout
     assert wt_list.strip().count("\n") == 0  # only the primary worktree line
+    # ...but the BRANCH is KEPT so the failing code stays inspectable.
     branch_list = subprocess.run(
         ["git", "branch", "--list", "ai-os/TASK-1"], cwd=git_repo, check=True, capture_output=True, text=True
     ).stdout
-    assert branch_list.strip() == ""
+    assert branch_list.strip() != ""
 
 
 async def test_reports_status_transitions(git_repo: Path):

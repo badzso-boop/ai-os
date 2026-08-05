@@ -110,6 +110,7 @@ The system works **end-to-end from the command line today**: give it a high-leve
 - **Project conventions** — a committed `.ai-os/conventions.md` (i18n rules, UI-library gotchas, …) is injected into both the plan and every task's prompt, provider-agnostically.
 - **Live observability** — the CLI streams what each task is doing (attempt, routed model + tokens, sandbox pass/fail with output, retries, merges); `-v` shows full logs.
 - **Resilience & cost control** — a usage/rate-limit blocks just that task (the PR still finalizes the completed ones), a cheap model summarizes large failure logs before the expensive one retries, adaptive 429 backoff + provider fallback, and an optional per-epic USD cap.
+- **Operational hardening** — a cross-run lock stops two epics clobbering the same repo; a task touching CI/secrets/`.ai-os` config is flagged at plan-review and can't be blind-merged to main (it goes through a reviewable PR); a crashed epic *resumes on its existing branch* (keeping completed work); and a BLOCKED task **keeps its branch + surfaces the error in the PR body** so you can see why it failed instead of the code vanishing.
 - **Crash resume** — `ai-os epic resume` re-runs only the not-yet-completed tasks of a crashed epic.
 
 ---
@@ -128,7 +129,7 @@ cd ai-os
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # 2. Run the test suite (real Docker containers; never makes a real LLM/network call)
-.venv/bin/pytest -q          # 383 tests (376 passed + 6 skipped opt-in + 1 documented xfail), ~51s
+.venv/bin/pytest -q          # 395 tests (388 passed + 6 skipped opt-in + 1 documented xfail), ~52s
 
 # 3. One-time: build the sandbox image used to validate Python tasks
 #    (bakes pytest in, since the sandbox runs with --network none)

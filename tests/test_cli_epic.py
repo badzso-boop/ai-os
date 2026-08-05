@@ -83,6 +83,26 @@ def test_epic_run_yes_flag_skips_gate(monkeypatch, tmp_path):
     assert flag["ran"] is True
 
 
+def test_merge_to_main_refused_when_plan_touches_sensitive_files(monkeypatch, tmp_path):
+    flag = {"ran": False}
+    _patch_common(monkeypatch, tmp_path, flag)
+    # Override the plan with a task that writes a CI workflow.
+    plan = [TaskNode(id="T1", title="ci", description="d", risk_level="HIGH",
+                     target_files=[".github/workflows/deploy.yml"], write_set={".github/workflows/deploy.yml"})]
+
+    async def fake_decompose(prompt, engine, adapter, model=None, conventions=""):
+        return plan
+
+    monkeypatch.setattr(cli_module, "decompose", fake_decompose)
+    result = CliRunner().invoke(
+        cli_module.main,
+        ["epic", "run", "proj", "--prompt", "add ci", "--language", "python", "--yes", "--merge-to-main"],
+    )
+    assert result.exit_code != 0
+    assert "sensitive" in result.output.lower()
+    assert flag["ran"] is False  # never executed
+
+
 def test_epic_run_errors_without_providers(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_module.registry, "resolve", lambda n: tmp_path)
     monkeypatch.setattr(cli_module, "load_configured_adapters", lambda: {})

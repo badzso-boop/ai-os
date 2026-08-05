@@ -310,10 +310,13 @@ class EpicRunner:
         result.completed = [node.id for node, status in loaded if status == "COMPLETED"]
 
         await self.persistence.set_epic_status(epic_id, "RUNNING")
-        return await self._execute_batches(tasks, result, epic_id)
+        # reuse_branch=True: continue on the crashed run's integration branch
+        # (which holds the completed tasks), instead of resetting it to main.
+        return await self._execute_batches(tasks, result, epic_id, reuse_branch=True)
 
     async def _execute_batches(
-        self, tasks: list[TaskNode], result: EpicRunResult, epic_id: Optional[str]
+        self, tasks: list[TaskNode], result: EpicRunResult, epic_id: Optional[str],
+        reuse_branch: bool = False,
     ) -> EpicRunResult:
         """The shared batch-execution core for both `run_epic` and `resume_epic`.
         Any task id already present in `result.completed` on entry (resume's
@@ -330,7 +333,9 @@ class EpicRunner:
         # end. In merge-to-main mode, staging keeps its default base ("main").
         if self.create_pr:
             branch = f"ai-os/epic-{epic_id or uuid.uuid4().hex[:12]}"
-            await self.staging.create_integration_branch(branch, from_ref=self.pr_base_branch)
+            await self.staging.create_integration_branch(
+                branch, from_ref=self.pr_base_branch, reuse_existing=reuse_branch
+            )
             self.staging.base_branch = branch
             result.integration_branch = branch
 
@@ -408,6 +413,13 @@ class EpicRunner:
             title, body = self._build_pr_content(result, tasks)
             try:
                 await self.staging.push_branch(branch)
+                # Push BLOCKED task branches too, so their failing code is
+                # inspectable on the remote (referenced in the PR body).
+                for tid in result.blocked:
+                    try:
+                        await self.staging.push_branch(self.staging.task_branch_name(tid))
+                    except Exception:
+                        pass  # best-effort — the branch still exists locally
                 result.pull_request_url = await self.staging.open_pull_request(
                     head=branch, base=self.pr_base_branch, title=title, body=body
                 )
@@ -455,6 +467,15 @@ class EpicRunner:
             outcome = status_by_id.get(task.id, "—")
             title_cell = task.title.replace("|", "\\|")
             lines.append(f"| {task.id} | {title_cell} | {task.risk_level} | {routed} | {deps} | {outcome} |")
+
+        if result.blocked:
+            lines += ["", "### ⛔ Blocked tasks (validation failed — code kept for inspection)"]
+            for tid in result.blocked:
+                branch = self.staging.task_branch_name(tid)
+                task_result = result.task_results.get(tid)
+                out = ((task_result.final_output if task_result else "") or "").strip()
+                tail = "\n".join(out.splitlines()[-15:]) or "(no validation output captured)"
+                lines += ["", f"**{tid}** — inspect branch `{branch}`. Last validation output:", "```", tail, "```"]
 
         lines += [
             "",

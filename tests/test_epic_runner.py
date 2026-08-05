@@ -432,6 +432,40 @@ async def test_on_event_reports_sandbox_failure_and_retry(git_repo: Path):
     assert any(e["type"] == "retry" for e in events)  # retries were reported
 
 
+async def test_blocked_task_branch_is_preserved(git_repo: Path):
+    # A BLOCKED task keeps its branch so the failing code stays inspectable.
+    runner = EpicRunner(
+        repo_root=git_repo, scheduler=DynamicScheduler(ProtocolRouter({"gemini": _FilePerTaskAdapter()}), environ={}),
+        adapters={"gemini": _FilePerTaskAdapter()}, language="python",
+        sandbox_runner=_AlwaysFailSandbox(), create_pr=False,
+    )
+    result = await runner.run_epic([_task("A")])
+    assert result.blocked == ["A"]
+    branches = subprocess.run(["git", "branch"], cwd=git_repo, capture_output=True, text=True).stdout
+    assert "ai-os/A" in branches  # branch kept for inspection (not deleted)
+
+
+def test_pr_body_includes_blocked_errors():
+    from ai_os.core.scheduler import Assignment
+    from ai_os.core.epic_runner import EpicRunResult
+    from ai_os.core.task_runner import TaskRunResult
+
+    runner = EpicRunner(
+        repo_root="/tmp", scheduler=DynamicScheduler(ProtocolRouter({"gemini": _FilePerTaskAdapter()}), environ={}),
+        adapters={"gemini": _FilePerTaskAdapter()}, language="python",
+    )
+    result = EpicRunResult()
+    result.blocked = ["A"]
+    result.assignments = {"A": Assignment("anthropic", "sonnet")}
+    result.task_results = {"A": TaskRunResult(task_id="A", status="BLOCKED", attempts=4, final_output="ERROR TS2322: asChild does not exist")}
+    tasks = [_task("A")]
+
+    _title, body = runner._build_pr_content(result, tasks)
+    assert "Blocked tasks" in body
+    assert "ai-os/A" in body  # the branch to inspect
+    assert "TS2322" in body  # the actual error surfaced
+
+
 def test_pr_body_includes_dag_table():
     from ai_os.core.scheduler import Assignment
     from ai_os.core.epic_runner import EpicRunResult

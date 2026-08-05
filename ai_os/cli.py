@@ -26,6 +26,8 @@ from ai_os.core.cost_estimator import estimate_epic
 from ai_os.core.models import TaskNode
 from ai_os.core.scaffold import DB_CAPABLE, PRESETS, write_scaffold
 from ai_os.core.persistence import Persistence, default_db_url
+from ai_os.core.run_lock import RunLockError, acquire_epic_run_lock
+from ai_os.core.sensitive_files import sensitive_paths
 from ai_os.core.scheduler import DynamicScheduler
 from ai_os.core.scheduling_policy import SchedulingPolicy
 from ai_os.core.staging import GitStagingEngine
@@ -619,6 +621,13 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
     except registry.ProjectPathError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    # Cross-run lock: two epic runs on the same repo share its git working tree
+    # and would clobber each other's `git checkout`. Held until this process exits.
+    try:
+        acquire_epic_run_lock(root)
+    except RunLockError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     adapters = load_configured_adapters()
     if not adapters:
         raise click.ClickException(
@@ -662,6 +671,24 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
     except Exception:
         estimate = None  # estimation is best-effort; never block the run on it
     _print_plan_table(tasks, assignments, estimate)
+
+    # Security guard: flag tasks touching CI/secrets/build/AI-OS-config files —
+    # these run with real credentials post-merge, so they must go through a
+    # reviewable PR, never a blind --merge-to-main.
+    flagged = sensitive_paths({p for t in tasks for p in t.write_set})
+    if flagged:
+        console.print(
+            "\n[bold yellow]⚠ Security-sensitive files in this plan[/bold yellow] "
+            "(run with real credentials in CI / change how AI-OS validates) — review carefully:"
+        )
+        for p in flagged:
+            console.print(f"  [yellow]•[/yellow] {p}")
+        if merge_to_main:
+            raise click.ClickException(
+                "Refusing --merge-to-main: this plan touches security-sensitive files. "
+                "Run without --merge-to-main so the change goes through a PR a human reviews."
+            )
+        console.print("[dim]These will go through the PR (default) for human review before merge.[/dim]")
 
     # HITL Stage 1: Plan Review gate (doc 12 §2.1). The React UI version is
     # Phase 4b; the approval gate itself works fine in a terminal.
@@ -772,6 +799,11 @@ def epic_resume(name_or_path: str, epic_id: str, language: str, merge_to_main: b
     try:
         root = registry.resolve(name_or_path)
     except registry.ProjectPathError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        acquire_epic_run_lock(root)  # same cross-run lock as `epic run`
+    except RunLockError as exc:
         raise click.ClickException(str(exc)) from exc
 
     adapters = load_configured_adapters()

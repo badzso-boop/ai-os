@@ -239,8 +239,11 @@ class GitStagingEngine:
             await self.cleanup_worktree(task_id)
             return True
 
-    async def cleanup_worktree(self, task_id: str) -> None:
-        """Force-remove the worktree directory and delete its branch."""
+    async def cleanup_worktree(self, task_id: str, keep_branch: bool = False) -> None:
+        """Force-remove the worktree directory and (unless `keep_branch`) delete
+        its branch. `keep_branch=True` preserves the task's commits — used for a
+        BLOCKED task so its (validation-failing) code stays inspectable via
+        `git checkout ai-os/<task-id>` or a pushed branch, instead of vanishing."""
         branch = self._branch_name(task_id)
         wt_path = self._worktree_path(task_id)
         await self._run_git(
@@ -248,7 +251,13 @@ class GitStagingEngine:
             self.repo_root,
             check=False,
         )
-        await self._run_git(["branch", "-D", branch], self.repo_root, check=False)
+        if not keep_branch:
+            await self._run_git(["branch", "-D", branch], self.repo_root, check=False)
+
+    def task_branch_name(self, task_id: str) -> str:
+        """The branch a task's worktree commits to (public accessor for callers
+        that push/inspect a BLOCKED task's preserved branch)."""
+        return self._branch_name(task_id)
 
     async def abandon_task(self, task_id: str) -> None:
         """Explicit terminal-cleanup path for a task being permanently given
@@ -260,11 +269,26 @@ class GitStagingEngine:
 
     # -- integration branch + PR / merge finalize (Phase 5 follow-up) --------
 
-    async def create_integration_branch(self, branch: str, from_ref: str | None = None) -> None:
+    async def create_integration_branch(
+        self, branch: str, from_ref: str | None = None, reuse_existing: bool = False
+    ) -> None:
         """Create (or reset) an integration branch off `from_ref` and check it
         out in `repo_root`, so subsequent per-task worktrees branch from it and
         their merges accumulate on it. Used by PR mode to gather a whole epic's
-        work on one branch before opening a single PR."""
+        work on one branch before opening a single PR.
+
+        `reuse_existing=True` (resume): if the branch already exists, check it out
+        AS-IS instead of resetting it to `from_ref` — so a resumed epic continues
+        on the branch that already holds its completed tasks, rather than wiping
+        them by resetting to main."""
+        if reuse_existing:
+            rc, _, _ = await self._run_git(
+                ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                self.repo_root, check=False,
+            )
+            if rc == 0:
+                await self._run_git(["checkout", branch], self.repo_root)
+                return
         base = from_ref or self.base_branch
         await self._run_git(["checkout", "-B", branch, base], self.repo_root)
 

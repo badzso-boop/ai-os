@@ -315,7 +315,10 @@ class TaskRunner:
                 if attempt < max_attempts:
                     self._emit(type="retry", task_id=task.id, next_attempt=attempt + 1)
 
-            await self.staging.abandon_task(task.id)
+            # BLOCKED: remove the worktree dir but KEEP the branch so the
+            # failing code stays inspectable (git checkout ai-os/<task-id>, or a
+            # pushed branch + the error in the PR body) — instead of discarding it.
+            await self.staging.cleanup_worktree(task.id, keep_branch=True)
             await self._report_status(task.id, "BLOCKED")
             return TaskRunResult(
                 task_id=task.id, status="BLOCKED", attempts=attempt, final_output=last_output

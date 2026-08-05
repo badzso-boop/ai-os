@@ -88,6 +88,43 @@ async def test_create_worktree_idempotent_crash_recovery(git_repo):
     assert wt_path_2.exists()
 
 
+async def test_cleanup_keep_branch_preserves_commits(git_repo):
+    # A BLOCKED task keeps its branch (with the committed, failing code) for
+    # inspection, even though the worktree directory is removed.
+    engine = GitStagingEngine(git_repo)
+    wt_path = await engine.create_worktree("TASK-B")
+    (wt_path / "wip.txt").write_text("failing attempt\n")
+    subprocess.run(["git", "add", "."], cwd=wt_path, check=True)
+    subprocess.run(["git", "commit", "-m", "wip"], cwd=wt_path, check=True)
+
+    await engine.cleanup_worktree("TASK-B", keep_branch=True)
+    assert not (git_repo / ".ai-os" / "worktrees" / "TASK-B").exists()  # worktree gone
+    assert _branch_exists(git_repo, "ai-os/TASK-B")  # branch kept
+    # the committed code is recoverable from the branch
+    show = subprocess.run(["git", "show", "ai-os/TASK-B:wip.txt"], cwd=git_repo, capture_output=True, text=True)
+    assert show.stdout == "failing attempt\n"
+
+
+async def test_create_integration_branch_reuse_preserves_work(git_repo):
+    # resume must continue on the existing integration branch (with its completed
+    # commits), not reset it to main.
+    engine = GitStagingEngine(git_repo)
+    await engine.create_integration_branch("ai-os/epic-x", from_ref="main")
+    (git_repo / "done.txt").write_text("completed task\n")
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "a completed task"], cwd=git_repo, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=git_repo, check=True)
+
+    # reuse: the branch's commit must survive (NOT reset to main).
+    await engine.create_integration_branch("ai-os/epic-x", from_ref="main", reuse_existing=True)
+    assert (git_repo / "done.txt").read_text() == "completed task\n"
+
+    # non-reuse (fresh run): resets from main -> the file is gone.
+    subprocess.run(["git", "checkout", "main"], cwd=git_repo, check=True)
+    await engine.create_integration_branch("ai-os/epic-x", from_ref="main")
+    assert not (git_repo / "done.txt").exists()
+
+
 async def test_stage_and_merge_happy_path(git_repo):
     engine = GitStagingEngine(git_repo)
     wt_path = await engine.create_worktree("TASK-3")
