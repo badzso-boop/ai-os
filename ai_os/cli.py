@@ -24,7 +24,7 @@ from ai_os.core.lock_manager import LockManager
 from ai_os.core.conventions import load_project_conventions
 from ai_os.core.cost_estimator import estimate_epic
 from ai_os.core.models import TaskNode
-from ai_os.core.scaffold import PRESETS, write_scaffold
+from ai_os.core.scaffold import DB_CAPABLE, PRESETS, write_scaffold
 from ai_os.core.persistence import Persistence, default_db_url
 from ai_os.core.scheduler import DynamicScheduler
 from ai_os.core.scheduling_policy import SchedulingPolicy
@@ -54,19 +54,26 @@ def main() -> None:
 @main.command("init")
 @click.argument("path", type=click.Path(file_okay=False))
 @click.option("--stack", required=True, type=click.Choice(PRESETS), help="Project template to scaffold.")
+@click.option("--with-db", "with_db", is_flag=True, help="Add a Postgres sidecar + migration/seed + a DB-backed test (fastapi/fastapi-react/spring/next-prisma).")
 @click.option("--name", default=None, help="Registry name to register the project under (default: the dir name).")
-def init(path: str, stack: str, name: str | None) -> None:
+def init(path: str, stack: str, with_db: bool, name: str | None) -> None:
     """Scaffold a NEW project from zero at PATH (a working baseline + tests +
     `.ai-os/sandbox.json`), make it a git repo with an initial `main` commit, and
     register it — so `ai-os epic run` can build on it immediately.
 
     Deterministic: templates are written directly (no network / host toolchain).
     For the `fastapi-react` monorepo, run epics per language (`--language python`
-    for the backend, `--language typescript` for the frontend).
+    for the backend, `--language typescript` for the frontend). `--with-db` wires
+    a throwaway Postgres sidecar (on a `--internal` network) with a migration +
+    reference-data seed + a DB-backed test.
     """
     root = Path(path).resolve()
+    if with_db and stack not in DB_CAPABLE:
+        raise click.ClickException(
+            f"--with-db is not supported for --stack {stack}. Supported: {', '.join(DB_CAPABLE)}"
+        )
     try:
-        written = write_scaffold(root, stack)
+        written = write_scaffold(root, stack, with_db=with_db)
     except FileExistsError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -105,7 +112,7 @@ def init(path: str, stack: str, name: str | None) -> None:
         console.print(f"  ai-os epic run {reg_name} --prompt \"add a /users CRUD API with tests\" --language python")
         console.print(f"  ai-os epic run {reg_name} --prompt \"add a users list page\" --language typescript")
     else:
-        lang = "python" if stack == "fastapi" else "typescript"
+        lang = {"fastapi": "python", "react": "typescript", "spring": "java", "next-prisma": "typescript"}[stack]
         console.print(f"  ai-os epic run {reg_name} --prompt \"...\" --language {lang}")
 
 

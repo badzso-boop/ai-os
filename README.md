@@ -128,7 +128,7 @@ cd ai-os
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # 2. Run the test suite (real Docker containers; never makes a real LLM/network call)
-.venv/bin/pytest -q          # 372 tests (365 passed + 6 skipped opt-in + 1 documented xfail), ~52s
+.venv/bin/pytest -q          # 383 tests (376 passed + 6 skipped opt-in + 1 documented xfail), ~51s
 
 # 3. One-time: build the sandbox image used to validate Python tasks
 #    (bakes pytest in, since the sandbox runs with --network none)
@@ -167,6 +167,13 @@ Scaffold a working baseline (source + a passing test + a wired `.ai-os/sandbox.j
 ai-os init ./myapp --stack fastapi-react --name myapp   # FastAPI backend + React frontend monorepo
 ai-os init ./api   --stack fastapi                      # Python backend only
 ai-os init ./web   --stack react                        # Vite + React + TS frontend only
+ai-os init ./svc   --stack spring                       # Java Spring Boot (Maven)
+ai-os init ./shop  --stack next-prisma                  # Next.js + Prisma (TypeScript)
+
+# --with-db adds a throwaway Postgres sidecar + a migration/schema + a
+# reference-data seed + a DB-backed test (fastapi / fastapi-react / spring / next-prisma):
+ai-os init ./shop  --stack next-prisma --with-db
+ai-os init ./api   --stack fastapi     --with-db
 ```
 
 For the monorepo, run epics **per language** (one epic can also span both — each task validates with its own sandbox profile, derived from its file extensions):

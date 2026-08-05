@@ -8,7 +8,7 @@ import pytest
 
 from ai_os.core.epic_runner import resolve_task_language
 from ai_os.core.models import TaskNode
-from ai_os.core.scaffold import PRESETS, scaffold_files, write_scaffold
+from ai_os.core.scaffold import DB_CAPABLE, PRESETS, scaffold_files, write_scaffold
 from ai_os.sandbox.sandbox_config import load_sandbox_config
 
 
@@ -58,6 +58,51 @@ def test_write_scaffold_creates_files_and_refuses_overwrite(tmp_path):
 def test_unknown_preset_raises():
     with pytest.raises(ValueError):
         scaffold_files("cobol-mainframe")
+
+
+def test_scaffold_spring_has_pom_and_test():
+    files = scaffold_files("spring")
+    assert "pom.xml" in files and "spring-boot-starter-web" in files["pom.xml"]
+    assert "src/main/java/com/example/demo/HealthController.java" in files
+    assert "src/test/java/com/example/demo/HealthControllerTest.java" in files
+
+
+def test_scaffold_next_prisma_has_schema_and_config():
+    files = scaffold_files("next-prisma")
+    assert "prisma/schema.prisma" in files and "model Widget" in files["prisma/schema.prisma"]
+    assert "package.json" in files and "@prisma/client" in files["package.json"]
+
+
+@pytest.mark.parametrize("preset", DB_CAPABLE)
+def test_with_db_adds_a_database_and_seed(preset):
+    files = scaffold_files(preset, with_db=True)
+    cfg = json.loads(files[".ai-os/sandbox.json"])
+    # a database is declared (flat, or under a language for the monorepo)
+    has_db = "database" in cfg or any("database" in v for v in cfg.get("languages", {}).values())
+    assert has_db
+    # a seed exists somewhere
+    assert any("seed" in rel.lower() or "V900" in rel for rel in files)
+
+
+def test_with_db_rejected_for_react():
+    with pytest.raises(ValueError):
+        scaffold_files("react", with_db=True)
+
+
+def test_with_db_prisma_uses_db_push_and_seed():
+    files = scaffold_files("next-prisma", with_db=True)
+    assert "prisma/seed.ts" in files
+    cfg = json.loads(files[".ai-os/sandbox.json"])
+    assert cfg["database"]["image"].startswith("postgres")
+    assert any("db push" in c for c in cfg["setup_commands"])
+
+
+def test_with_db_monorepo_scopes_db_to_python(tmp_path):
+    files = scaffold_files("fastapi-react", with_db=True)
+    cfg = json.loads(files[".ai-os/sandbox.json"])
+    assert "database" in cfg["languages"]["python"]      # backend gets the DB
+    assert "database" not in cfg["languages"]["typescript"]  # frontend does not
+    assert "backend/scripts/seed.py" in files
 
 
 # -- per-task language resolution (multi-language epic) ----------------------
