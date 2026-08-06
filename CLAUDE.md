@@ -322,6 +322,9 @@ When starting Phase 3+ implementation, follow this structure unless there's a co
 | `16_MVP_DEVELOPMENT_ROADMAP.md` | 4-phase build order: (1) Analyzer & Knowledge Graph **[done]**, (2) Core/Locking/Git **[done]**, (3) MCP Router & Sandbox **[done]**, (4) Glass Box UI & HITL **[4a done: Epic decomposition + multi-model distribution + CLI plan-review gate; 4b (React UI/WebSocket/Monaco) not built]** |
 | `17_YOUTUBE_SERIES_AND_OPENSOURCE_PLAN.md` | Content/marketing plan for a companion YouTube devlog series (not architecture) |
 | `18_YOUTUBE_PRODUCTION_AND_EDITING_GUIDE.md` | Video production/editing playbook for the same series (not architecture) |
+| `19_UI_DEBUG_TOOLCHAIN.md` | **Design doc, NOT built.** UI-bug debugging: deterministic HTML/CSS/JS UI-graph + headless Playwright probe + suspicion detectors → cheap-model triage → expensive-model fix → Playwright sandbox validation. Applies "Compiler First" + cheap→expensive routing to the UI. |
+| `20_STARTUP_GENERATOR.md` | **Design doc, NOT built.** `ai-os startup`: a detailed startup brief → a clean, self-contained static HTML/CSS/JS demo with a simulated backend (`sim` layer), built on a deterministic `scaffold.py` "startup" preset + LLM content, validated with the doc-19 Playwright layer, then optionally deployed via doc 21. |
+| `21_STATIC_SUBDOMAIN_DEPLOY.md` | **Design doc, NOT built.** `deploy_static.sh`: a deterministic, **additive-only** script that serves a static bundle from an isolated Docker nginx container behind the EXISTING Cloudflare Tunnel + host nginx on Norbert's live shared server. Central rule: never edit shared config, wildcard zone so per-deploy is host-nginx-only, `nginx -t` before reload (never restart), namespaced + registry-backed teardown. Encodes the shared-server safety constraints. |
 
 ## Language note
 
