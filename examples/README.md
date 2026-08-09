@@ -49,3 +49,17 @@ approve a run, so you can see exactly where each task will go.
 Model slugs in that file are illustrative — check the live catalog and pricing at
 <https://openrouter.ai/models>. Because the risk→model matrix is pure env config,
 a model rename is a one-line change, never a code edit.
+
+## 3. Startup Concept Demo Generator → `startup/`
+
+Demonstrates `ai-os startup`: generates a self-contained, self-running static web concept demo (with embedded client simulation `sim.js`) from a structured startup brief or text prompt.
+
+```bash
+# Generate from sample brief startup.md:
+ai-os startup --brief examples/startup/startup.md --out examples/startup/freshbox-demo --no-deploy
+
+# Run the generated demo locally:
+cd examples/startup/freshbox-demo
+python3 -m http.server 8000
+```
+

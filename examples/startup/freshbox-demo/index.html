@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FreshBox</title>
+    <link rel="stylesheet" href="styles/tokens.css">
+</head>
+<body>
+    <header class="hero">
+        <h1 id="app-title">FreshBox</h1>
+        <p id="value-prop" class="subtitle">heti dobozos, helyi termelői zöldség-előfizetés budapesti háztartásoknak.</p>
+    </header>
+    <main class="content">
+        <section id="pages-section">
+            <h2>Pages</h2>
+            <ul id="pages-list">
+                <li><a href="#landing-(főoldal">Landing (főoldal</a></li>
+                <li><a href="#értékajánlat">értékajánlat</a></li>
+                <li><a href="#vásárlói-vélemények)">vásárlói vélemények)</a></li>
+                <li><a href="#hogyan-működik-(lépések-a-termelőtől-a-konyháig)">Hogyan működik (lépések a termelőtől a konyháig)</a></li>
+                <li><a href="#árazás-(dobozméretek-és-előfizetési-csomagok)">Árazás (dobozméretek és előfizetési csomagok)</a></li>
+                <li><a href="#termék-demó-(interaktív-csomagválasztó-és-kosár)">Termék-demó (interaktív csomagválasztó és kosár)</a></li>
+                <li><a href="#dashboard-(szimulált-előfizetői-fiók-a-következő-szállítással)">Dashboard (szimulált előfizetői fiók a következő szállítással)</a></li>
+            </ul>
+        </section>
+        <section id="core-flow-section">
+            <h2>Core Flow</h2>
+            <ol id="core-flow-list">
+                <li>Csomagválasztás: doboz-méret (Kicsi / Családi) és szállítási gyakoriság kiválasztása.</li>
+                <li>Doboz testreszabás: megnézi a heti doboz tartalmát (mock zöldség-lista) és kicserél 1 tételt.</li>
+                <li>Megrendelés (fake checkout): szimulált fizetés és azonnali átirányítás a szimulált Dashboardra a szállítás visszaszámlálójával.</li>
+            </ol>
+        </section>
+    </main>
+    <script src="sim/seed.js"></script>
+</body>
+</html>

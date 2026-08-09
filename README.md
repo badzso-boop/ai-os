@@ -164,6 +164,21 @@ AI-OS has two kinds of commands: **deterministic, zero-LLM analysis** (free, off
 
 > **Worked examples** live in **[`examples/`](examples/)**: [`create_full_project.sh`](examples/create_full_project.sh) scaffolds a complete FastAPI + React project from zero and (optionally) builds a feature end-to-end; [`openrouter-multimodel.env`](examples/openrouter-multimodel.env) configures OpenRouter with a different model per risk level.
 
+### A00. Generate a Startup Concept Demo — `ai-os startup`
+
+Generates a self-contained, self-running static web concept demo from a text description or markdown brief file. Includes a zero-token HTML/CSS/JS scaffold and a client-side simulation layer (`sim.js`: localStorage persistence, fake auth, simulated API, payment checkout).
+
+```bash
+# Generate from a text prompt:
+ai-os startup --prompt "FreshBox - heti dobozos helyi zoldseg elofizetes" --out ./freshbox-demo --no-deploy
+
+# Generate from a structured brief file (see examples/startup/startup.md):
+ai-os startup --brief examples/startup/startup.md --out ./freshbox-demo --no-deploy
+
+# Serve locally:
+cd freshbox-demo && python3 -m http.server 8000
+```
+
 ### A0. Start a new project from zero — `ai-os init`
 
 Scaffold a working baseline (source + a passing test + a wired `.ai-os/sandbox.json`), make it a git repo with an initial `main` commit, and register it — so `ai-os epic run` can build on it immediately. Deterministic (no network / host toolchain at init time).
