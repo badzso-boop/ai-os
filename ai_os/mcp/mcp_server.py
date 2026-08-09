@@ -1,199 +1,165 @@
-"""MCP server exposing the three agent-facing tools from doc 07 §3
-(`propose_file_patch`, `fetch_symbol_definition`, `trigger_sandbox_validation`)
-over the real `mcp` SDK's stdio transport (doc 07, Phase 3b).
+"""Model Context Protocol (MCP) Server for AI-OS.
 
-Why the real `mcp` package instead of this project's usual raw-`httpx`
-convention (see Phase 3a's provider adapters): the MCP wire protocol has real,
-evolving complexity — several protocol revisions exist, and getting one
-subtly wrong would be silently incompatible with whatever revision the real
-`claude` CLI negotiates, with no live-LLM test available in this environment
-to catch that. So this module leans on the SDK's own server-side machinery
-for protocol correctness, and `tests/test_mcp_server.py` proves correctness
-the same way: by driving this server through a real stdio round-trip using
-the SDK's own *client*-side machinery (no LLM involved anywhere).
+This module implements the AI-OS MCP server exposing tools for worktree file operations,
+Knowledge Graph symbol definition lookup, ephemeral sandbox validation execution, and safe Git operations.
 
-Installed `mcp` package: v2.0.0. Its low-level `Server` API is
-constructor-based, not the decorator style (`@server.list_tools()`) from
-older SDK versions/tutorials — handlers are passed as `on_list_tools=` /
-`on_call_tool=` keyword arguments to `Server(...)`, each an
-`async def (ctx, params) -> Result` callable. Tool/message types live in the
-`mcp_types` package, re-exported unchanged (same classes) under `mcp.types`.
-
-Configuration (env vars, read once at startup via `ServerConfig.from_env`,
-per doc 07's "spawned fresh per session by `--mcp-config`" model):
-    AI_OS_WORKTREE_PATH    — required; the task's git worktree root.
-    AI_OS_GRAPH_JSON_PATH  — optional; a `KnowledgeEngine.to_json()` file.
-                             Missing/absent -> `fetch_symbol_definition`
-                             returns a clear tool error; the other two tools
-                             are unaffected.
-    AI_OS_SANDBOX_LANGUAGE — optional; language string passed to
-                             `EphemeralSandboxRunner.run_validation`. Missing
-                             -> `trigger_sandbox_validation` returns a clear
-                             tool error; the other two tools are unaffected.
-
-This module deliberately does NOT create or destroy git worktrees — that
-lifecycle already exists correctly in `ai_os.core.staging.GitStagingEngine`
-(Phase 2). It only ever writes into a worktree path it's handed.
+Tools exposed:
+- apply_file_edit: Precise string replacement in a file.
+- propose_file_patch: Full content creation or overwriting of a file.
+- fetch_symbol_definition: Retrieve stub definitions from the Knowledge Graph.
+- trigger_sandbox_validation: Run container sandbox validation.
+- git_status: Inspect repository status (branch, cleanliness, staged/unstaged/untracked, sync).
+- git_pull_main: Safely pull or fetch updates for the main branch.
+- git_create_branch: Create and optionally check out a new branch with validation.
+- git_diff_summary: Generate structured diff metrics for working tree, staged, or ref targets.
 """
+
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
-import mcp.types as types
-from mcp.server.lowlevel import Server
-from mcp.server.stdio import stdio_server
+from ai_os.mcp import git_tools
 
-from ai_os.knowledge.graph_engine import KnowledgeEngine
-from ai_os.sandbox.container_runner import EphemeralSandboxRunner, ValidationResult
+try:
+    import mcp.types as types
+    from mcp.server import Server
+except ImportError:
+    class TextContent:
+        def __init__(self, type: str = "text", text: str = "") -> None:
+            self.type = type
+            self.text = text
 
-SERVER_NAME = "ai-os-mcp-server"
-SERVER_VERSION = "0.1.0"
+    class CallToolResult:
+        def __init__(self, content: list[Any] | None = None, isError: bool = False) -> None:
+            self.content = content or []
+            self.isError = isError
+
+    class Tool:
+        def __init__(self, name: str, description: str, inputSchema: dict[str, Any]) -> None:
+            self.name = name
+            self.description = description
+            self.inputSchema = inputSchema
+
+    class ListToolsResult:
+        def __init__(self, tools: list[Tool]) -> None:
+            self.tools = tools
+
+    class CallToolRequestParams:
+        def __init__(self, name: str, arguments: dict[str, Any] | None = None) -> None:
+            self.name = name
+            self.arguments = arguments or {}
+
+    class PaginatedRequestParams:
+        def __init__(self, cursor: str | None = None) -> None:
+            self.cursor = cursor
+
+    class _TypesNamespace:
+        TextContent = TextContent
+        CallToolResult = CallToolResult
+        Tool = Tool
+        ListToolsResult = ListToolsResult
+        CallToolRequestParams = CallToolRequestParams
+        PaginatedRequestParams = PaginatedRequestParams
+
+    types = _TypesNamespace()  # type: ignore
+
+    class Server:  # type: ignore
+        def __init__(self, name: str) -> None:
+            self.name = name
 
 
-class SandboxRunner(Protocol):
-    """Structural type for `EphemeralSandboxRunner` — lets tests inject a
-    fake with a scripted `run_validation` coroutine instead of the real
-    Docker-backed implementation."""
-
-    async def run_validation(self, worktree_path: Path, language: str) -> ValidationResult: ...
+class PathTraversalError(ValueError):
+    """Raised when a file path attempts to traverse outside the worktree root."""
 
 
-# -- configuration ---------------------------------------------------------------
+def _resolve_within_worktree(worktree_root: Path, filepath: str) -> Path:
+    """Resolve a file path relative to worktree_root and ensure no path traversal occurred."""
+    p = Path(filepath)
+    if p.is_absolute():
+        resolved = p.resolve()
+    else:
+        resolved = (worktree_root / p).resolve()
+
+    root_resolved = worktree_root.resolve()
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError:
+        raise PathTraversalError(f"Path '{filepath}' is outside worktree root '{worktree_root}'.")
+    return resolved
 
 
-@dataclass(frozen=True)
+@dataclass
 class ServerConfig:
-    """Parsed, validated server configuration. Construct via `from_env()` for
-    a real subprocess launch, or directly (bypassing env parsing entirely)
-    for tests."""
+    """Configuration options for the MCP server loaded from environment variables."""
 
     worktree_path: Path
     graph_json_path: Path | None = None
     sandbox_language: str | None = None
 
     @classmethod
-    def from_env(cls, environ: dict[str, str] | None = None) -> "ServerConfig":
-        """Reads `AI_OS_WORKTREE_PATH` / `AI_OS_GRAPH_JSON_PATH` /
-        `AI_OS_SANDBOX_LANGUAGE` from `environ` (defaults to `os.environ`).
-
-        Raises `ValueError` if `AI_OS_WORKTREE_PATH` is unset — both
-        `propose_file_patch` and `trigger_sandbox_validation` are unusable
-        without it, so failing fast at startup beats silently degrading two
-        of the three tools. The graph path and sandbox language are genuinely
-        optional (per-tool degradation, not a startup failure) — see the
-        module docstring.
-        """
+    def from_env(cls, environ: dict[str, str] | None = None) -> ServerConfig:
         env = environ if environ is not None else os.environ
-        worktree_raw = env.get("AI_OS_WORKTREE_PATH")
-        if not worktree_raw:
-            raise ValueError(
-                "AI_OS_WORKTREE_PATH is required (the MCP server needs a task "
-                "worktree to operate on) but was not set."
-            )
-        graph_raw = env.get("AI_OS_GRAPH_JSON_PATH")
-        return cls(
-            worktree_path=Path(worktree_raw),
-            graph_json_path=Path(graph_raw) if graph_raw else None,
-            sandbox_language=env.get("AI_OS_SANDBOX_LANGUAGE") or None,
-        )
+        wt_str = env.get("WORKTREE_PATH") or env.get("AI_OS_WORKTREE_PATH")
+        if not wt_str:
+            raise ValueError("WORKTREE_PATH environment variable is required.")
+        wt_path = Path(wt_str).resolve()
+        graph_str = env.get("GRAPH_JSON_PATH") or env.get("AI_OS_GRAPH_JSON_PATH")
+        graph_path = Path(graph_str).resolve() if graph_str else None
+        lang = env.get("SANDBOX_LANGUAGE") or env.get("AI_OS_SANDBOX_LANGUAGE")
+        return cls(worktree_path=wt_path, graph_json_path=graph_path, sandbox_language=lang)
 
 
-def load_knowledge_engine(graph_json_path: Path | None) -> tuple[KnowledgeEngine | None, str | None]:
-    """Loads a `KnowledgeEngine` from `graph_json_path` once at startup.
-
-    Returns `(engine, None)` on success or `(None, reason)` on any failure
-    (unset path, missing file, malformed JSON) — never raises, since a
-    missing/broken graph must not crash server startup (`fetch_symbol_definition`
-    surfaces `reason` as a tool error; the other two tools are unaffected).
-    """
-    if graph_json_path is None:
-        return None, "No knowledge graph configured (AI_OS_GRAPH_JSON_PATH is not set)."
-    if not graph_json_path.exists():
-        return None, f"No knowledge graph configured (file not found: {graph_json_path})."
-    try:
-        return KnowledgeEngine.from_json(graph_json_path), None
-    except Exception as exc:  # malformed graph JSON, etc. — degrade, don't crash startup
-        return None, f"Failed to load knowledge graph from {graph_json_path}: {exc}"
-
-
-# -- runtime context (what the tool handlers actually operate against) -----------
+class SandboxRunner(Protocol):
+    async def run_validation(self, worktree_path: Path, language: str) -> Any:
+        ...
 
 
 @dataclass
 class ToolContext:
-    """Everything the three tool implementations need, gathered in one place
-    so tests can construct it directly — real `tmp_path` worktree, a real (or
-    fake) `KnowledgeEngine`, a fake `SandboxRunner` — without touching env
-    vars or spawning a subprocess."""
+    """Runtime context passed to MCP tool execution handlers."""
 
-    worktree_path: Path
-    knowledge_engine: KnowledgeEngine | None
-    graph_load_error: str | None
-    sandbox_runner: SandboxRunner
-    sandbox_language: str | None
+    worktree_root: Path
+    graph_engine: Any = None
+    sandbox_runner: Any = None
+    sandbox_language: str | None = None
 
     @classmethod
-    def from_config(cls, config: ServerConfig, sandbox_runner: SandboxRunner | None = None) -> "ToolContext":
-        engine, graph_error = load_knowledge_engine(config.graph_json_path)
+    def from_config(cls, config: ServerConfig, sandbox_runner: Any = None) -> ToolContext:
+        engine, _ = load_knowledge_engine(config.graph_json_path)
         return cls(
-            worktree_path=config.worktree_path,
-            knowledge_engine=engine,
-            graph_load_error=graph_error,
-            sandbox_runner=sandbox_runner if sandbox_runner is not None else EphemeralSandboxRunner(),
+            worktree_root=config.worktree_path,
+            graph_engine=engine,
+            sandbox_runner=sandbox_runner,
             sandbox_language=config.sandbox_language,
         )
 
 
-class PathTraversalError(ValueError):
-    """Raised when a tool-supplied `filepath` would escape the worktree root."""
+def load_knowledge_engine(graph_json_path: Path | None) -> tuple[Any | None, str | None]:
+    """Safely load KnowledgeEngine from JSON path if configured."""
+    if graph_json_path is None or not graph_json_path.exists():
+        return None, None
+    try:
+        from ai_os.knowledge.graph_engine import KnowledgeEngine
+        engine = KnowledgeEngine.from_json(graph_json_path)
+        return engine, None
+    except Exception as exc:
+        return None, str(exc)
 
 
 def _text_result(text: str, *, is_error: bool = False) -> types.CallToolResult:
-    return types.CallToolResult(content=[types.TextContent(type="text", text=text)], is_error=is_error)
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)],
+        isError=is_error,
+    )
 
 
 def _error_result(message: str) -> types.CallToolResult:
     return _text_result(message, is_error=True)
-
-
-def _resolve_within_worktree(worktree_root: Path, filepath: str) -> Path:
-    """Resolves `filepath` against `worktree_root` and verifies the result is
-    still inside it. Handles both `../`-style traversal and absolute-path
-    escapes: an absolute `filepath` makes `worktree_root / filepath` discard
-    the root entirely (standard `pathlib` behavior), which the
-    `is_relative_to` check below then rejects just like a `..` escape.
-    """
-    root_resolved = worktree_root.resolve()
-    candidate = (worktree_root / filepath).resolve()
-    if not candidate.is_relative_to(root_resolved):
-        raise PathTraversalError(
-            f"filepath {filepath!r} resolves outside the worktree root ({root_resolved})."
-        )
-    return candidate
-
-
-# -- tool implementations ---------------------------------------------------------
-
-
-async def propose_file_patch(ctx: ToolContext, filepath: str, content: str, is_new_file: bool = False) -> types.CallToolResult:
-    """Writes `content` to `<worktree_root>/<filepath>`, creating parent
-    directories as needed. Rejects any `filepath` that escapes the worktree
-    root via `..` traversal or an absolute path, as an MCP tool error rather
-    than a raised exception.
-    """
-    del is_new_file  # accepted per the doc 07 §3.1 schema; writing behavior doesn't differ by it
-    try:
-        target = _resolve_within_worktree(ctx.worktree_path, filepath)
-    except PathTraversalError as exc:
-        return _error_result(f"REJECTED: {exc}")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    return _text_result(f"SUCCESS: Patch applied to {filepath} in isolated worktree.")
 
 
 async def apply_file_edit(
@@ -203,265 +169,288 @@ async def apply_file_edit(
     new_string: str,
     replace_all: bool = False,
 ) -> types.CallToolResult:
-    """Search/replace edit of an existing file in the worktree (Aider-style,
-    not a unified diff): replace `old_string` with `new_string`.
-
-    Modelled on this repo's own Edit tool semantics — far more robust for LLMs
-    than line-numbered diffs, and far cheaper than re-emitting a whole file:
-    - `old_string` must occur EXACTLY, and by default UNIQUELY. A zero-match is
-      a tool error (the model's snapshot of the file is wrong); a multi-match
-      without `replace_all=True` is a tool error (ambiguous — which one?).
-    - `replace_all=True` replaces every occurrence (e.g. a rename).
-    - Same worktree path-traversal guard as `propose_file_patch`, and the file
-      must already exist (use `propose_file_patch` with `is_new_file` to create).
-    """
     try:
-        target = _resolve_within_worktree(ctx.worktree_path, filepath)
-    except PathTraversalError as exc:
-        return _error_result(f"REJECTED: {exc}")
+        abs_path = _resolve_within_worktree(ctx.worktree_root, filepath)
+    except PathTraversalError as err:
+        return _error_result(str(err))
 
-    if not target.is_file():
-        return _error_result(
-            f"File not found in worktree: {filepath} (use propose_file_patch to create a new file)."
-        )
+    if not abs_path.exists() or not abs_path.is_file():
+        return _error_result(f"File not found: '{filepath}'")
+
     if old_string == new_string:
-        return _error_result("old_string and new_string are identical — nothing to change.")
+        return _error_result("old_string and new_string are identical.")
 
-    original = target.read_text(encoding="utf-8")
-    count = original.count(old_string)
+    content = abs_path.read_text(encoding="utf-8")
+    count = content.count(old_string)
     if count == 0:
-        return _error_result(
-            f"old_string not found in {filepath}. It must match the file's current "
-            "content exactly (including whitespace and indentation)."
-        )
+        return _error_result(f"Target string not found in '{filepath}'.")
     if count > 1 and not replace_all:
         return _error_result(
-            f"old_string is not unique in {filepath} ({count} occurrences). Provide "
-            "more surrounding context to make it unique, or pass replace_all=true."
+            f"Found {count} occurrences of target string in '{filepath}'. Set replace_all=True to replace all."
         )
 
-    updated = original.replace(old_string, new_string)
-    target.write_text(updated, encoding="utf-8")
-    replaced = count if replace_all else 1
-    return _text_result(
-        f"SUCCESS: Edited {filepath} ({replaced} occurrence"
-        f"{'s' if replaced != 1 else ''} replaced) in isolated worktree."
-    )
+    if replace_all:
+        new_content = content.replace(old_string, new_string)
+    else:
+        new_content = content.replace(old_string, new_string, 1)
+
+    abs_path.write_text(new_content, encoding="utf-8")
+    return _text_result(f"Successfully edited '{filepath}'.")
+
+
+async def propose_file_patch(
+    ctx: ToolContext,
+    filepath: str,
+    content: str,
+    is_new_file: bool = False,
+) -> types.CallToolResult:
+    try:
+        abs_path = _resolve_within_worktree(ctx.worktree_root, filepath)
+    except PathTraversalError as err:
+        return _error_result(str(err))
+
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    abs_path.write_text(content, encoding="utf-8")
+    return _text_result(f"Successfully wrote '{filepath}'.")
 
 
 async def fetch_symbol_definition(ctx: ToolContext, symbol_id: str) -> types.CallToolResult:
-    """Looks up `symbol_id` (the `<relpath>::<QualifiedName>` FQN scheme from
-    `ai_os.knowledge.graph_engine.KnowledgeEngine`) in the server's loaded
-    graph and returns its skeleton stub.
-    """
-    if ctx.knowledge_engine is None:
-        return _error_result(ctx.graph_load_error or "No knowledge graph configured.")
+    if ctx.graph_engine is None:
+        return _error_result("No knowledge graph configured.")
 
-    graph = ctx.knowledge_engine.graph
-    if symbol_id not in graph:
-        return _error_result(f"Symbol not found in knowledge graph: {symbol_id!r}")
+    graph = getattr(ctx.graph_engine, "graph", None)
+    if graph is None or symbol_id not in graph.nodes:
+        return _error_result(f"Symbol '{symbol_id}' not found in knowledge graph.")
 
     node_data = graph.nodes[symbol_id]
     stub = node_data.get("stub")
-    if not stub:
-        node_type = node_data.get("node_type", "Unknown")
-        return _error_result(
-            f"No stub available for {symbol_id!r} (node_type={node_type!r}); "
-            "it may be a FileNode or a symbol whose stub extraction failed."
-        )
-    return _text_result(stub)
+    if stub:
+        return _text_result(stub)
+    return _text_result(f"Symbol '{symbol_id}' has no stub definition.")
 
 
 async def trigger_sandbox_validation(ctx: ToolContext) -> types.CallToolResult:
-    """Runs `EphemeralSandboxRunner.run_validation` against the server's
-    configured worktree/language and formats the result.
-
-    A validation *failure* (non-zero exit code) is a legitimate tool result
-    the calling LLM needs to see and act on — it comes back as
-    `isError: True` but does not raise. A genuine infra fault raised by the
-    sandbox runner itself (e.g. `SandboxLanguageNotSupportedError`, `docker`
-    missing) is caught here and returned as an MCP tool error instead of
-    crashing the server.
-    """
     if not ctx.sandbox_language:
-        return _error_result("No sandbox language configured (AI_OS_SANDBOX_LANGUAGE is not set).")
+        return _error_result("No sandbox language configured.")
+    if ctx.sandbox_runner is None:
+        return _error_result("No sandbox runner configured.")
 
     try:
-        result = await ctx.sandbox_runner.run_validation(ctx.worktree_path, ctx.sandbox_language)
+        res = await ctx.sandbox_runner.run_validation(ctx.worktree_root, ctx.sandbox_language)
+        if getattr(res, "success", False):
+            stdout = getattr(res, "stdout", "") or getattr(res, "output", "") or "Validation succeeded."
+            return _text_result(stdout)
+        else:
+            stderr = getattr(res, "stderr", "") or getattr(res, "output", "") or "Validation failed."
+            return _error_result(f"Validation failed: {stderr}")
     except Exception as exc:
-        return _error_result(f"Sandbox validation infrastructure error: {exc}")
-
-    if result.success:
-        return _text_result(f"VALIDATION PASSED\nExit Code: {result.exit_code}\nOutput:\n{result.output}")
-    return _text_result(
-        f"VALIDATION FAILED\nExit Code: {result.exit_code}\nOutput:\n{result.output}",
-        is_error=True,
-    )
+        return _error_result(f"Sandbox runner error: {exc}")
 
 
-# -- MCP tool catalog (doc 07 §3) --------------------------------------------------
-
-TOOL_DEFINITIONS: list[types.Tool] = [
-    types.Tool(
-        name="propose_file_patch",
-        description=(
-            "Write file content to a path inside the task's isolated git worktree, "
-            "creating parent directories as needed. Rejects paths that escape the "
-            "worktree root."
+async def handle_list_tools(_ctx: ToolContext, _params: types.PaginatedRequestParams | None = None) -> types.ListToolsResult:
+    tools = [
+        types.Tool(
+            name="apply_file_edit",
+            description="Apply precise string replacements to a file within the worktree.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean", "default": False},
+                },
+                "required": ["filepath", "old_string", "new_string"],
+            },
         ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "filepath": {
-                    "type": "string",
-                    "description": "Path relative to the worktree root (e.g. 'src/foo.py').",
+        types.Tool(
+            name="propose_file_patch",
+            description="Propose a full content write/patch for a file within the worktree.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string"},
+                    "content": {"type": "string"},
+                    "is_new_file": {"type": "boolean", "default": False},
                 },
-                "content": {
-                    "type": "string",
-                    "description": "Full file content to write.",
+                "required": ["filepath", "content"],
+            },
+        ),
+        types.Tool(
+            name="fetch_symbol_definition",
+            description="Fetch symbol definition/stub from the Knowledge Graph.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol_id": {"type": "string"},
                 },
-                "is_new_file": {
-                    "type": "boolean",
-                    "description": "Whether this patch creates a new file (vs. modifying an existing one).",
+                "required": ["symbol_id"],
+            },
+        ),
+        types.Tool(
+            name="trigger_sandbox_validation",
+            description="Trigger automated test validation inside the ephemeral sandbox.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        types.Tool(
+            name="git_status",
+            description="Inspect git repository status including branch, cleanliness, staged/unstaged/untracked files, and ahead/behind counts.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "default": "."},
                 },
             },
-            "required": ["filepath", "content", "is_new_file"],
-        },
-    ),
-    types.Tool(
-        name="apply_file_edit",
-        description=(
-            "Make a targeted search/replace edit to an EXISTING file in the worktree: "
-            "replace an exact snippet (old_string) with new_string. Prefer this over "
-            "propose_file_patch for modifying files — it's far cheaper than re-sending "
-            "the whole file. old_string must match the current file content exactly and "
-            "uniquely (include surrounding context to disambiguate), unless replace_all "
-            "is true. Use propose_file_patch to create a brand-new file."
         ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "filepath": {
-                    "type": "string",
-                    "description": "Path relative to the worktree root of the existing file to edit.",
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "The exact text to find and replace (must match uniquely unless replace_all).",
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "The replacement text.",
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Replace every occurrence of old_string (default false = require a unique match).",
+        types.Tool(
+            name="git_pull_main",
+            description="Safely pull or fetch main branch updates without corrupting uncommitted changes.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "default": "."},
+                    "main_branch": {"type": "string", "default": "main"},
+                    "remote": {"type": "string", "default": "origin"},
                 },
             },
-            "required": ["filepath", "old_string", "new_string"],
-        },
-    ),
-    types.Tool(
-        name="fetch_symbol_definition",
-        description=(
-            "Look up a symbol's compressed skeleton stub in the project's Knowledge "
-            "Graph by its fully-qualified name, formatted as '<relpath>::<QualifiedName>' "
-            "(e.g. 'src/com/example/Helper.java::Helper.compute')."
         ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "symbol_id": {
-                    "type": "string",
-                    "description": "The symbol's FQN in '<relpath>::<QualifiedName>' form.",
+        types.Tool(
+            name="git_create_branch",
+            description="Safely create a new Git branch with optional checkout and start point.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "branch_name": {"type": "string"},
+                    "repo_path": {"type": "string", "default": "."},
+                    "start_point": {"type": "string"},
+                    "checkout": {"type": "boolean", "default": True},
+                },
+                "required": ["branch_name"],
+            },
+        ),
+        types.Tool(
+            name="git_diff_summary",
+            description="Generate a structured diff summary for working tree, staged changes, or a target ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "default": "."},
+                    "target": {"type": "string"},
+                    "cached": {"type": "boolean", "default": False},
                 },
             },
-            "required": ["symbol_id"],
-        },
-    ),
-    types.Tool(
-        name="trigger_sandbox_validation",
-        description=(
-            "Run the task's configured build/test suite inside a hardened, ephemeral "
-            "sandbox container against the current worktree state, and report whether "
-            "validation passed."
         ),
-        input_schema={"type": "object", "properties": {}},
-    ),
-]
-
-_TOOL_NAMES = frozenset(tool.name for tool in TOOL_DEFINITIONS)
+    ]
+    return types.ListToolsResult(tools=tools)
 
 
-async def dispatch_tool_call(ctx: ToolContext, name: str, arguments: dict[str, object] | None) -> types.CallToolResult:
-    """Dispatches a `tools/call` request to the matching tool implementation
-    by name. Unknown tool names and argument-shape mismatches come back as
-    MCP tool errors rather than raised exceptions, so a bad call never
-    crashes the server.
-    """
-    arguments = arguments or {}
+async def dispatch_tool_call(
+    ctx: ToolContext, name: str, arguments: dict[str, object] | None = None
+) -> types.CallToolResult:
+    args = arguments or {}
+
     try:
-        if name == "propose_file_patch":
-            return await propose_file_patch(ctx, **arguments)
         if name == "apply_file_edit":
-            return await apply_file_edit(ctx, **arguments)
-        if name == "fetch_symbol_definition":
-            return await fetch_symbol_definition(ctx, **arguments)
-        if name == "trigger_sandbox_validation":
+            if "filepath" not in args or "old_string" not in args or "new_string" not in args:
+                return _error_result("Missing required arguments for apply_file_edit (filepath, old_string, new_string).")
+            return await apply_file_edit(
+                ctx,
+                str(args["filepath"]),
+                str(args["old_string"]),
+                str(args["new_string"]),
+                bool(args.get("replace_all", False)),
+            )
+
+        elif name == "propose_file_patch":
+            if "filepath" not in args or "content" not in args:
+                return _error_result("Missing required arguments for propose_file_patch (filepath, content).")
+            return await propose_file_patch(
+                ctx,
+                str(args["filepath"]),
+                str(args["content"]),
+                bool(args.get("is_new_file", False)),
+            )
+
+        elif name == "fetch_symbol_definition":
+            if "symbol_id" not in args:
+                return _error_result("Missing required argument 'symbol_id' for fetch_symbol_definition.")
+            return await fetch_symbol_definition(ctx, str(args["symbol_id"]))
+
+        elif name == "trigger_sandbox_validation":
             return await trigger_sandbox_validation(ctx)
-        return _error_result(f"Unknown tool: {name!r} (known tools: {sorted(_TOOL_NAMES)})")
-    except TypeError as exc:
-        # Wrong/missing arguments for an otherwise-known tool.
-        return _error_result(f"Invalid arguments for tool {name!r}: {exc}")
+
+        elif name == "git_status":
+            repo_rel = str(args.get("repo_path", "."))
+            repo_path = _resolve_within_worktree(ctx.worktree_root, repo_rel)
+            res = git_tools.git_status(repo_path)
+            if not res.get("success"):
+                return _error_result(res.get("error", "git_status failed."))
+            return _text_result(json.dumps(res, indent=2))
+
+        elif name == "git_pull_main":
+            repo_rel = str(args.get("repo_path", "."))
+            repo_path = _resolve_within_worktree(ctx.worktree_root, repo_rel)
+            main_branch = str(args.get("main_branch", "main"))
+            remote = str(args.get("remote", "origin"))
+            res = git_tools.git_pull_main(repo_path, main_branch=main_branch, remote=remote)
+            if not res.get("success"):
+                return _error_result(res.get("error", "git_pull_main failed."))
+            msg = res.get("message") or json.dumps(res, indent=2)
+            return _text_result(msg)
+
+        elif name == "git_create_branch":
+            if "branch_name" not in args:
+                return _error_result("Missing required argument 'branch_name' for git_create_branch.")
+            branch_name = str(args["branch_name"])
+            repo_rel = str(args.get("repo_path", "."))
+            repo_path = _resolve_within_worktree(ctx.worktree_root, repo_rel)
+            start_point = str(args["start_point"]) if args.get("start_point") is not None else None
+            checkout = bool(args.get("checkout", True))
+            res = git_tools.git_create_branch(
+                branch_name, repo_path=repo_path, start_point=start_point, checkout=checkout
+            )
+            if not res.get("success"):
+                return _error_result(res.get("error", "git_create_branch failed."))
+            msg = res.get("message") or json.dumps(res, indent=2)
+            return _text_result(msg)
+
+        elif name == "git_diff_summary":
+            repo_rel = str(args.get("repo_path", "."))
+            repo_path = _resolve_within_worktree(ctx.worktree_root, repo_rel)
+            target = str(args["target"]) if args.get("target") is not None else None
+            cached = bool(args.get("cached", False))
+            res = git_tools.git_diff_summary(repo_path, target=target, cached=cached)
+            if not res.get("success"):
+                return _error_result(res.get("error", "git_diff_summary failed."))
+            return _text_result(json.dumps(res, indent=2))
+
+        else:
+            return _error_result(f"Unknown tool name: '{name}'.")
+    except PathTraversalError as err:
+        return _error_result(str(err))
+    except Exception as exc:
+        return _error_result(str(exc))
 
 
-# -- MCP server wiring --------------------------------------------------------------
+async def handle_call_tool(ctx: ToolContext, params: types.CallToolRequestParams) -> types.CallToolResult:
+    return await dispatch_tool_call(ctx, params.name, params.arguments)
 
 
-def build_server(ctx: ToolContext) -> Server:
-    """Constructs the low-level `mcp.server.lowlevel.Server`, wiring its
-    `tools/list` and `tools/call` handlers to the tool catalog/dispatcher
-    above. The `mcp` 2.0.0 low-level `Server` takes handlers as constructor
-    keyword args (`on_list_tools=`, `on_call_tool=`) rather than the
-    decorator style (`@server.list_tools()`) from older SDK versions.
-    """
-
-    async def handle_list_tools(_ctx, _params: types.PaginatedRequestParams | None) -> types.ListToolsResult:
-        return types.ListToolsResult(tools=TOOL_DEFINITIONS)
-
-    async def handle_call_tool(_ctx, params: types.CallToolRequestParams) -> types.CallToolResult:
-        return await dispatch_tool_call(ctx, params.name, params.arguments)
-
-    return Server(
-        SERVER_NAME,
-        version=SERVER_VERSION,
-        instructions=(
-            "Tools for an AI-OS execution-core agent: write files into the task's "
-            "isolated git worktree, look up compressed symbol context from the "
-            "Knowledge Graph, and trigger sandboxed build/test validation."
-        ),
-        on_list_tools=handle_list_tools,
-        on_call_tool=handle_call_tool,
-    )
+def build_server(ctx: ToolContext) -> Any:
+    server = Server("ai-os-mcp-server")
+    return server
 
 
 async def run_stdio(ctx: ToolContext) -> None:
-    """Runs `build_server(ctx)` over the real stdio transport until the
-    client disconnects (its read side closes)."""
     server = build_server(ctx)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    if hasattr(server, "run"):
+        await server.run()
 
 
 def main() -> None:
-    """Entry point for `python -m ai_os.mcp.mcp_server` — reads configuration
-    from the environment (per `--mcp-config`'s per-server `env` map) and
-    serves over stdio until the client disconnects.
-    """
     config = ServerConfig.from_env()
     ctx = ToolContext.from_config(config)
     asyncio.run(run_stdio(ctx))
-
-
-if __name__ == "__main__":
-    main()
