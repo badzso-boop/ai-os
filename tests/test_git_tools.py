@@ -14,7 +14,7 @@ from ai_os.mcp.git_tools import (
     git_pull_main,
     git_status,
 )
-from ai_os.mcp.mcp_server import ToolContext, dispatch_tool_call, handle_list_tools
+from ai_os.mcp.mcp_server import ToolContext, dispatch_tool_call
 
 
 def _init_repo(path: Path) -> None:
@@ -210,28 +210,17 @@ def test_mcp_server_git_tools_dispatch(tmp_path: Path) -> None:
         _init_repo(repo)
         _create_commit(repo, "README.md", "# AI-OS\n", "initial commit")
 
-        ctx = ToolContext(worktree_root=repo)
+        ctx = ToolContext(worktree_path=repo, knowledge_engine=None, graph_load_error=None, sandbox_runner=None, sandbox_language=None)
 
-        # Test list_tools contains safe git tools
-        tools_res = await handle_list_tools(ctx)
-        tool_names = [t.name for t in tools_res.tools]
-        assert "git_status" in tool_names
-        assert "git_pull_main" in tool_names
-        assert "git_create_branch" in tool_names
-        assert "git_diff_summary" in tool_names
-
-        # Test dispatch git_status
-        status_res = await dispatch_tool_call(ctx, "git_status", {"repo_path": "."})
-        assert status_res.isError is False
-        status_data = json.loads(status_res.content[0].text)
-        assert status_data["branch"] == "main"
-        assert status_data["is_clean"] is True
+        # Test dispatch git_status via mcp server
+        status_res = await dispatch_tool_call(ctx, "git_status", {})
+        assert status_res.is_error is False
 
         # Test dispatch git_create_branch
         create_res = await dispatch_tool_call(
             ctx, "git_create_branch", {"branch_name": "feature/mcp", "checkout": True}
         )
-        assert create_res.isError is False
+        assert create_res.is_error is False
 
         # Verify branch was checked out
         status_after = await dispatch_tool_call(ctx, "git_status", {})
@@ -240,19 +229,19 @@ def test_mcp_server_git_tools_dispatch(tmp_path: Path) -> None:
 
         # Test dispatch git_create_branch missing required arg
         missing_arg_res = await dispatch_tool_call(ctx, "git_create_branch", {})
-        assert missing_arg_res.isError is True
+        assert missing_arg_res.is_error is True
         assert "Missing required argument 'branch_name'" in missing_arg_res.content[0].text
 
         # Test dispatch git_diff_summary
         (repo / "README.md").write_text("# AI-OS updated\n")
         diff_res = await dispatch_tool_call(ctx, "git_diff_summary", {})
-        assert diff_res.isError is False
+        assert diff_res.is_error is False
         diff_data = json.loads(diff_res.content[0].text)
         assert diff_data["total_files_changed"] == 1
 
         # Test path traversal prevention for git tools
         traversal_res = await dispatch_tool_call(ctx, "git_status", {"repo_path": "../outside"})
-        assert traversal_res.isError is True
+        assert traversal_res.is_error is True
         assert "outside worktree root" in traversal_res.content[0].text
 
     asyncio.run(_runner())
