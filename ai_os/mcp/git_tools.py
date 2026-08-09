@@ -32,15 +32,13 @@ def _run_git(args: list[str], cwd: str | Path) -> tuple[int, str, str]:
 
     try:
         proc = subprocess.run(
-            ["git"] + args,
+            ["git", "-c", "safe.directory=*"] + args,
             cwd=path,
             capture_output=True,
             text=True,
             check=False,
         )
         return (proc.returncode, proc.stdout.strip(), proc.stderr.strip())
-    except FileNotFoundError:
-        return (1, "", f"Path '{path}' is not a valid git repository (git command not found).")
     except Exception as exc:
         return (1, "", str(exc))
 
@@ -106,19 +104,28 @@ def git_status(repo_path: str | Path = ".") -> dict[str, Any]:
                         pass
         elif line.startswith("? "):
             untracked.append(line[2:].strip())
-        elif line.startswith("1 ") or line.startswith("2 "):
+        elif line.startswith("1 "):
             parts = line.split(" ", 8)
-            if len(parts) >= 2:
+            if len(parts) >= 9:
                 xy = parts[1]
-                path_str = parts[-1].split("\t")[0]
+                path_str = parts[8].split("\t")[0]
+                if xy[0] != ".":
+                    staged.append(path_str)
+                if xy[1] != ".":
+                    unstaged.append(path_str)
+        elif line.startswith("2 "):
+            parts = line.split(" ", 9)
+            if len(parts) >= 10:
+                xy = parts[1]
+                path_str = parts[9].split("\t")[0]
                 if xy[0] != ".":
                     staged.append(path_str)
                 if xy[1] != ".":
                     unstaged.append(path_str)
         elif line.startswith("u "):
             parts = line.split(" ", 10)
-            if len(parts) >= 2:
-                path_str = parts[-1]
+            if len(parts) >= 11:
+                path_str = parts[10]
                 unstaged.append(path_str)
 
     if branch in ("(initial)", "(detached)"):

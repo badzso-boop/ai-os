@@ -383,7 +383,7 @@ async def dispatch_tool_call(
             return await trigger_sandbox_validation(ctx)
 
         elif name == "git_status":
-            repo_rel = str(args.get("repo_path", "."))
+            repo_rel = str(args["repo_path"]) if args.get("repo_path") is not None else "."
             repo_path = _resolve_within_worktree(ctx.worktree_root, repo_rel)
             res = git_tools.git_status(repo_path)
             if not res.get("success"):
@@ -391,10 +391,10 @@ async def dispatch_tool_call(
             return _text_result(json.dumps(res, indent=2))
 
         elif name == "git_pull_main":
-            repo_rel = str(args.get("repo_path", "."))
+            repo_rel = str(args["repo_path"]) if args.get("repo_path") is not None else "."
             repo_path = _resolve_within_worktree(ctx.worktree_root, repo_rel)
-            main_branch = str(args.get("main_branch", "main"))
-            remote = str(args.get("remote", "origin"))
+            main_branch = str(args["main_branch"]) if args.get("main_branch") is not None else "main"
+            remote = str(args["remote"]) if args.get("remote") is not None else "origin"
             res = git_tools.git_pull_main(repo_path, main_branch=main_branch, remote=remote)
             if not res.get("success"):
                 return _error_result(res.get("error", "git_pull_main failed."))
@@ -402,13 +402,13 @@ async def dispatch_tool_call(
             return _text_result(msg)
 
         elif name == "git_create_branch":
-            if "branch_name" not in args:
+            if "branch_name" not in args or args["branch_name"] is None:
                 return _error_result("Missing required argument 'branch_name' for git_create_branch.")
             branch_name = str(args["branch_name"])
-            repo_rel = str(args.get("repo_path", "."))
+            repo_rel = str(args["repo_path"]) if args.get("repo_path") is not None else "."
             repo_path = _resolve_within_worktree(ctx.worktree_root, repo_rel)
             start_point = str(args["start_point"]) if args.get("start_point") is not None else None
-            checkout = bool(args.get("checkout", True))
+            checkout = bool(args["checkout"]) if args.get("checkout") is not None else True
             res = git_tools.git_create_branch(
                 branch_name, repo_path=repo_path, start_point=start_point, checkout=checkout
             )
@@ -418,10 +418,10 @@ async def dispatch_tool_call(
             return _text_result(msg)
 
         elif name == "git_diff_summary":
-            repo_rel = str(args.get("repo_path", "."))
+            repo_rel = str(args["repo_path"]) if args.get("repo_path") is not None else "."
             repo_path = _resolve_within_worktree(ctx.worktree_root, repo_rel)
             target = str(args["target"]) if args.get("target") is not None else None
-            cached = bool(args.get("cached", False))
+            cached = bool(args["cached"]) if args.get("cached") is not None else False
             res = git_tools.git_diff_summary(repo_path, target=target, cached=cached)
             if not res.get("success"):
                 return _error_result(res.get("error", "git_diff_summary failed."))
