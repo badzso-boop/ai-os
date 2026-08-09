@@ -39,6 +39,8 @@ def _run_git(args: list[str], cwd: str | Path) -> tuple[int, str, str]:
             check=False,
         )
         return (proc.returncode, proc.stdout.strip(), proc.stderr.strip())
+    except FileNotFoundError:
+        return (1, "", f"Path '{path}' is not a valid git repository (git command not found).")
     except Exception as exc:
         return (1, "", str(exc))
 
