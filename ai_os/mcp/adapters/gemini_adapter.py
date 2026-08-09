@@ -29,6 +29,11 @@ used the now-stale `gemini-1.5-flash` model id. As of verification:
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import tempfile
+from pathlib import Path
+
 import httpx
 
 from ai_os.mcp.adapters.base_adapter import (
@@ -44,24 +49,129 @@ from ai_os.mcp.adapters.base_adapter import (
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
+class GeminiCliError(RuntimeError):
+    """The `agy` CLI subprocess failed, or reported non-SUCCESS status."""
+
+    def __init__(self, returncode: int, stderr: str) -> None:
+        self.returncode = returncode
+        self.stderr = stderr
+        super().__init__(f"agy CLI failed (exit {returncode}): {stderr.strip()}")
+
+
+class GeminiCliOutputError(RuntimeError):
+    """The `agy` CLI's stdout wasn't parseable JSON."""
+
+    def __init__(self, stdout: str) -> None:
+        self.stdout = stdout
+        super().__init__(
+            f"agy CLI did not produce parseable JSON on stdout: {stdout[:500]!r}"
+        )
+
+
 class GeminiApiError(RuntimeError):
     """A Gemini API call returned a non-2xx response or an unexpected response shape."""
 
 
 class GeminiAdapter(BaseMCPAdapter):
-    """One adapter instance talks to the Google AI Studio Gemini API via one API key."""
+    """Talks to Google Gemini models, via the Antigravity CLI session or the Developer API.
+
+    Supports two modes:
+    1. CLI session mode (`use_cli_session=True`) — shells out to the `agy` CLI
+       using the user's logged-in Google / Antigravity subscription.
+    2. API-key mode (`api_key=...`) — direct HTTP requests to Google AI Studio API.
+    """
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None = None,
+        use_cli_session: bool = False,
         model: str = "gemini-3.5-flash-lite",
+        gemini_cli: str = "agy",
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.api_key = api_key
+        self.use_cli_session = use_cli_session
         self.model = model
+        self.gemini_cli = gemini_cli
         self.client = client if client is not None else httpx.AsyncClient(timeout=60.0)
+        self._scratch_dir_path: Path | None = None
+
+    def _scratch_dir(self) -> Path:
+        if self._scratch_dir_path is None or not self._scratch_dir_path.exists():
+            self._scratch_dir_path = Path(
+                tempfile.mkdtemp(prefix="ai-os-gemini-")
+            )
+        return self._scratch_dir_path
 
     async def execute_task(self, request: LLMTaskRequest) -> LLMTaskResponse:
+        if self.use_cli_session:
+            return await self._execute_via_cli(request)
+        if self.api_key:
+            return await self._execute_via_api(request)
+        raise ValueError(
+            "GeminiAdapter requires either use_cli_session=True or an api_key"
+        )
+
+    # -- CLI session mode ---------------------------------------------------
+
+    async def _execute_via_cli(self, request: LLMTaskRequest) -> LLMTaskResponse:
+        model = request.model
+        prompt = request.context_payload
+        if request.system_prompt:
+            prompt = f"System Instruction:\n{request.system_prompt}\n\nUser Context:\n{prompt}"
+
+        argv: list[str] = [
+            self.gemini_cli,
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--mode",
+            "accept-edits",
+            "--dangerously-skip-permissions",
+        ]
+        if model:
+            argv += ["--model", model]
+
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(self._scratch_dir()),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        assert proc.returncode is not None
+        stdout_text = stdout.decode()
+        stderr_text = stderr.decode()
+
+        if proc.returncode != 0:
+            raise GeminiCliError(proc.returncode, stderr_text)
+
+        try:
+            payload = json.loads(stdout_text)
+        except json.JSONDecodeError as exc:
+            raise GeminiCliOutputError(stdout_text) from exc
+
+        if payload.get("status") and payload.get("status") != "SUCCESS":
+            raise GeminiCliError(0, stderr_text or json.dumps(payload))
+
+        usage = payload.get("usage") or {}
+        model_name = model or payload.get("model", "gemini-cli-session")
+        return LLMTaskResponse(
+            task_id=request.task_id,
+            provider="gemini",
+            model_name=model_name,
+            generated_text=payload.get("response", ""),
+            usage=TokenUsage(
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                estimated_usd_cost=0.0,
+            ),
+        )
+
+    # -- API-key mode --------------------------------------------------------
+
+    async def _execute_via_api(self, request: LLMTaskRequest) -> LLMTaskResponse:
         model = request.model or self.model
         url = f"{GEMINI_API_BASE}/{model}:generateContent?key={self.api_key}"
 
@@ -120,7 +230,7 @@ class GeminiAdapter(BaseMCPAdapter):
         )
 
     def supports_tool_calling(self) -> bool:
-        return True
+        return bool(self.api_key) and not self.use_cli_session
 
     async def _generate_content(self, model: str, payload: dict) -> dict:
         """One generateContent round-trip: POST + shared error handling.
@@ -165,16 +275,18 @@ class GeminiAdapter(BaseMCPAdapter):
         dispatch: ToolDispatch,
         max_tool_iterations: int = 25,
     ) -> LLMTaskResponse:
-        """Gemini native function-calling agentic loop (the multi-turn version of
-        `execute_task`) against the same `generateContent` endpoint.
+        """Gemini native function-calling agentic loop (API-key mode only)."""
+        if self.use_cli_session:
+            raise ValueError(
+                "execute_with_tools is API-key-mode only. This adapter is in "
+                "CLI-session mode."
+            )
+        if not self.api_key:
+            raise ValueError(
+                "execute_with_tools requires API-key mode, but this adapter has "
+                "no api_key configured."
+            )
 
-        Each `ToolSpec` becomes one `functionDeclaration`. When the model emits
-        `functionCall` parts, every call is dispatched, its result appended as a
-        `functionResponse` part, and generateContent is called again — until the
-        model returns a turn with no functionCall parts (its final text answer).
-        A runaway loop (no final answer within `max_tool_iterations` round-trips)
-        is an error, not a silent truncation.
-        """
         model = request.model or self.model
 
         function_declarations = [

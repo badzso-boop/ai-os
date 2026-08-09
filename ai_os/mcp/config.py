@@ -57,8 +57,16 @@ def load_configured_adapters(
     elif anthropic_mode == "api_key" and anthropic_api_key:
         adapters["anthropic"] = AnthropicAdapter(api_key=anthropic_api_key)
 
+    gemini_cli_name = environ.get("GEMINI_CLI", "agy")
+    gemini_cli_path = shutil.which(gemini_cli_name, path=environ.get("PATH", ""))
     gemini_api_key = environ.get("GEMINI_API_KEY")
-    if gemini_api_key:
+    gemini_mode = environ.get("GEMINI_MODE")
+    if gemini_mode is None:
+        gemini_mode = "session" if gemini_cli_path else ("api_key" if gemini_api_key else None)
+
+    if gemini_mode == "session" and gemini_cli_path:
+        adapters["gemini"] = GeminiAdapter(use_cli_session=True, gemini_cli=gemini_cli_path)
+    elif gemini_mode == "api_key" and gemini_api_key:
         adapters["gemini"] = GeminiAdapter(api_key=gemini_api_key)
 
     openrouter_api_key = environ.get("OPENROUTER_API_KEY")
