@@ -1,26 +1,26 @@
 # Startup Brief: FreshBox
 
-## Név + egymondatos value prop
-FreshBox — heti dobozos, helyi termelői zöldség-előfizetés budapesti háztartásoknak.
+## Name & One-Sentence Value Proposition
+FreshBox — weekly subscription boxes of fresh, locally grown organic vegetables for urban households.
 
-## Célközönség
-Egészségtudatos, elfoglalt 28–45 éves budapesti lakosok, akik friss, vegyszermentes zöldséget szeretnének közvetlenül a hazai termelőktől, és kényelmes házhozszállítást keresnek.
+## Target Audience
+Health-conscious, busy professionals aged 28–45 living in metropolitan areas who want fresh, chemical-free produce directly from local farmers with convenient door delivery.
 
-## A demó fő flow-ja (szimulált működés)
-1. Csomagválasztás: doboz-méret (Kicsi / Családi) és szállítási gyakoriság kiválasztása.
-2. Doboz testreszabás: megnézi a heti doboz tartalmát (mock zöldség-lista) és kicserél 1 tételt.
-3. Megrendelés (fake checkout): szimulált fizetés és azonnali átirányítás a szimulált Dashboardra a szállítás visszaszámlálójával.
+## Core Demo Flow (Simulated Operations)
+1. Box Selection: choose box size (Small / Family) and delivery frequency (Weekly / Bi-weekly).
+2. Box Customization: inspect the current week's box contents (mock vegetable product list) and swap 1 item.
+3. Checkout & Ordering (fake checkout): simulated payment and instant redirect to the simulated Dashboard with a delivery countdown timer.
 
-## Oldalak
-- Landing (főoldal, értékajánlat, vásárlói vélemények)
-- Hogyan működik (lépések a termelőtől a konyháig)
-- Árazás (dobozméretek és előfizetési csomagok)
-- Termék-demó (interaktív csomagválasztó és kosár)
-- Dashboard (szimulált előfizetői fiók a következő szállítással)
+## Pages
+- Landing Page (hero section, value prop, customer testimonials)
+- How It Works (step-by-step from local farms to your kitchen)
+- Pricing (box sizes and subscription tiers)
+- Product Demo (interactive box selector and cart)
+- Dashboard (simulated subscriber account displaying the upcoming delivery)
 
-## Márka és hangnem
-Friss, természetes, zöldség-illusztrációk, barátságos minimál dizájn.
-Elsődleges szín: Természetes erdőzöld (#2e7d32). Támogatott témák: Világos és sötét mód.
+## Brand & Tone
+Fresh, natural, hand-drawn vegetable illustrations, friendly minimal design.
+Primary Color: Natural Forest Green (#2e7d32). Supported Themes: Light and dark mode toggle.
 
-## Amit NEM kell
-Valódi backend, valódi bankkártyás fizetés vagy e-mail küldés — minden kliensoldalon szimulált a `sim.js` segítségével.
+## What NOT to Include
+No real backend, no real credit card processing, no real email sending — everything is simulated client-side via `sim.js`.

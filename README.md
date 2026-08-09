@@ -170,7 +170,7 @@ Generates a self-contained, self-running static web concept demo from a text des
 
 ```bash
 # Generate from a text prompt:
-ai-os startup --prompt "FreshBox - heti dobozos helyi zoldseg elofizetes" --out ./freshbox-demo --no-deploy
+ai-os startup --prompt "FreshBox - weekly subscription boxes of fresh organic vegetables" --out ./freshbox-demo --no-deploy
 
 # Generate from a structured brief file (see examples/startup/startup.md):
 ai-os startup --brief examples/startup/startup.md --out ./freshbox-demo --no-deploy
