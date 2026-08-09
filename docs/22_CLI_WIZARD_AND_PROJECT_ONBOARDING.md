@@ -75,6 +75,24 @@ ai-os project add <name> <path> [--deep]
 
 ---
 
+### 2.3. CLI Olvashatóság és Életút-megjelenítés (Enhanced Glass-Box CLI Stream)
+
+Az `ai-os epic run` és `ai-os task run` folyamán a terminál kimenete **gazdag Rich formázással** és jól olvasható lépés-státuszokkal jelenik meg:
+- **Rich Stream Panel**: Színes státuszikonok (▶ futás, ✓ sikeres merge, ⚠ figyelmeztetés, ✗ sandbox hiba), futási időzítő (elapsed timer) és valós idejű token/USD költségkijelzés.
+- **Áttekinthető részletek**: A sandbox kimeneti tail-jének és a tesztkritikusi észrevételeknek keretezett, átlátható megjelenítése.
+
+---
+
+### 2.4. Biztonságos Git MCP Eszközök (Safe Git MCP Tools)
+
+Az `ai_os/mcp/mcp_server.py` szerver kibővül biztonsági korlátokkal védett Git MCP eszközökkel:
+- `git_status`: Visszaadja a jelenlegi git ágat, a módosított és untracked fájlokat.
+- `git_pull_main`: Biztonságosan lehúzza a legfrissebb `main` ágat (`git pull origin main`), garantálva, hogy uncommitted változtatások esetén nem írja felül a fájlokat.
+- `git_create_branch`: Új feature ágat hoz létre a megadott névmintával.
+- `git_diff_summary`: Visszaadja a törzstől való eltéréseket a tesztekhez és kódülvizsgálathoz.
+
+---
+
 ## 3. Generált konfigurációs fájlok formátuma
 
 ### 3.1. `.ai-os/instructions.json`
