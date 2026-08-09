@@ -68,3 +68,53 @@ task's prompt. Follow them exactly.
 - Do not touch `.github/workflows/*`, `.ai-os/*`, Dockerfiles, or any
   secrets/CI/build config — these are flagged for human review and must not be
   changed as part of a feature task.
+
+---
+
+## ⛔ Critical rules learned from production failures (MUST follow — non-negotiable)
+
+### 1. NEVER create a directory named after a third-party PyPI package
+**Why:** A local directory (e.g., `tests/mcp/`, `src/requests/`) with an
+`__init__.py` becomes a Python package that **shadows** the real installed package.
+Every `from mcp.xxx import ...` anywhere in the codebase will silently import
+from YOUR directory instead — causing `ModuleNotFoundError` for the real submodule.
+
+✅ **DO:** `tests/test_git_tools.py`, `tests/test_mcp_server.py`
+❌ **DON'T:** `tests/mcp/__init__.py`, `tests/requests/`, `tests/json/`
+
+**Rule:** If you want to group related tests in a subdirectory, name it after the
+FEATURE, not the library. E.g., `tests/git/test_tools.py`, `tests/mcp_server/test_git.py`.
+And check: does a PyPI package with that directory name exist? If yes, rename it.
+
+### 2. NEVER rename or change the signature of existing public APIs
+When you are asked to *extend* or *add to* an existing module, you must not:
+- Rename dataclass fields (e.g., `ToolContext.worktree_path` → `worktree_root`)
+- Change argument names/order of public functions
+- Change attribute names on return types (e.g., `CallToolResult.is_error` → `isError`)
+
+**Why:** Dozens of existing tests depend on the current API. Renaming breaks them all.
+
+**Rule:** Before touching any existing class/function:
+1. Run `grep -r "ClassName\|function_name" tests/` to see how it's used.
+2. Only EXTEND with new optional fields/parameters — never remove or rename.
+3. If you disagree with a naming choice, leave a comment and do NOT change it.
+
+### 3. ALWAYS verify existing tests still pass after your changes
+Before writing new test files, confirm the already-passing tests still pass with your new code:
+```bash
+python -m pytest tests/ --ignore=tests/your_new_file.py -q
+```
+If existing tests fail, STOP and fix the regression before continuing.
+
+### 4. When extending an existing module, copy it and diff — do not rewrite from scratch
+If you need to add new functionality to `ai_os/mcp/mcp_server.py` or similar,
+use the **existing file as your starting point**. Add your new code BELOW the existing
+code with minimal structural changes. A wholesale rewrite of 400-line modules is
+almost always wrong and will break the existing test suite.
+
+### 5. Do not add duplicate test shim files
+If `tests/test_git_tools.py` already exists, do NOT create `tests/ui/test_git_tools.py`
+or `tests/mcp/test_git_tools.py` as a re-exporting shim. The sandbox runs ALL
+test files under `tests/`, and duplicate names cause import collection errors.
+Your task's new tests should be in a single, well-named file.
+
