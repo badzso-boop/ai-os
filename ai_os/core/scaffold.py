@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-PRESETS = ("fastapi", "react", "fastapi-react", "spring", "next-prisma")
+PRESETS = ("fastapi", "react", "fastapi-react", "spring", "next-prisma", "startup")
 # Presets that support the `--with-db` flag (a Postgres sidecar + migration/seed).
 DB_CAPABLE = ("fastapi", "fastapi-react", "spring", "next-prisma")
 
@@ -527,6 +527,122 @@ class WidgetRepositoryTest {
 '''
 
 
+# -- Startup (Vanilla HTML/CSS/JS + Sim) ------------------------------------
+
+_STARTUP_INDEX_HTML = '''\
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Startup Demo</title>
+    <link rel="stylesheet" href="styles/reset.css" />
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/layout.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="sim/sim.js"></script>
+    <script type="module" src="sim/seed.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
+'''
+
+_STARTUP_RESET_CSS = '''\
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+body {
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+'''
+
+_STARTUP_TOKENS_CSS = '''\
+:root {
+  --color-primary: #0066cc;
+  --color-bg: #ffffff;
+  --color-text: #1a1a1a;
+  --font-family: system-ui, -apple-system, sans-serif;
+  --spacing-unit: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #121212;
+    --color-text: #f0f0f0;
+  }
+}
+'''
+
+_STARTUP_LAYOUT_CSS = '''\
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.flex {
+  display: flex;
+}
+
+.grid {
+  display: grid;
+}
+'''
+
+_STARTUP_SIM_JS = '''\
+export const store = {
+  get(key) {
+    const val = localStorage.getItem(key);
+    return val ? JSON.parse(val) : null;
+  },
+  set(key, val) {
+    localStorage.setItem(key, JSON.stringify(val));
+  }
+};
+
+export async function api(path, body = null) {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      resolve({ status: "ok", path, data: body });
+    }, 100);
+  });
+}
+'''
+
+_STARTUP_SEED_JS = '''\
+import { store } from './sim.js';
+
+export const seedData = {
+  users: [{ id: 1, name: "Demo User" }],
+  items: []
+};
+
+export function initSeed() {
+  if (!store.get('seeded')) {
+    store.set('data', seedData);
+    store.set('seeded', true);
+  }
+}
+'''
+
+_STARTUP_APP_JS = '''\
+import { initSeed } from './sim/seed.js';
+
+document.addEventListener('DOMContentLoaded', () => {
+  initSeed();
+  const app = document.getElementById('app');
+  if (app) {
+    app.innerHTML = '<h1>Startup Demo</h1>';
+  }
+});
+'''
+
+
 def scaffold_files(preset: str, with_db: bool = False) -> dict[str, str]:
     """Return `{relpath: content}` for a preset (does not touch disk).
 
@@ -535,6 +651,18 @@ def scaffold_files(preset: str, with_db: bool = False) -> dict[str, str]:
     DB-backed test."""
     if with_db and preset not in DB_CAPABLE:
         raise ValueError(f"--with-db is not supported for the {preset!r} preset")
+
+    if preset == "startup":
+        return {
+            "index.html": _STARTUP_INDEX_HTML,
+            "styles/reset.css": _STARTUP_RESET_CSS,
+            "styles/tokens.css": _STARTUP_TOKENS_CSS,
+            "styles/layout.css": _STARTUP_LAYOUT_CSS,
+            "sim/sim.js": _STARTUP_SIM_JS,
+            "sim/seed.js": _STARTUP_SEED_JS,
+            "app.js": _STARTUP_APP_JS,
+            ".ai-os/sandbox.json": _dumps({"test_command": "echo ok"}),
+        }
 
     if preset == "spring":
         files = {
