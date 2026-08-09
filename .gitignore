@@ -1,5 +1,7 @@
 .venv/
-.ai-os/
+.ai-os/*
+!.ai-os/sandbox.json
+!.ai-os/conventions.md
 __pycache__/
 *.pyc
 .pytest_cache/

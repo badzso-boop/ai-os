@@ -1,0 +1,4 @@
+{
+  "//": "Sandbox config for DOGFOODING AI-OS on itself. The repo's full test suite spins up REAL Docker containers (test_container_runner.py etc.), which can't run inside the ephemeral --network-none sandbox (no Docker-in-Docker). So validation is scoped to the pure, deterministic UI tests under tests/ui/, which need no Docker/network. The two-phase flow installs requirements.txt (the runtime deps) so `import ai_os` works; `python -m pytest` puts the repo root on sys.path. Widen `test_command` once a module has enough coverage to add a coverage gate.",
+  "test_command": "python -m pytest tests/ui -q -p no:cacheprovider"
+}
