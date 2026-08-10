@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 CONFIG_RELPATH = Path(".ai-os") / "sandbox.json"
 
@@ -81,6 +82,9 @@ class SandboxConfig:
     test_command: str | None = None
     # Optional coverage gate (Phase 6). `None` = no coverage enforcement.
     coverage: CoverageConfig | None = None
+    # Optional risks mapping for any custom risk definitions.
+    # Structure: {risk_name: {key: value, ...}, ...}
+    risks: dict[str, dict[str, Any]] | None = None
     # Override the language profile's base image — e.g. point at a Playwright
     # image (`mcr.microsoft.com/playwright:...`) so `setup_commands` can install
     # browsers and `test_command` can run e2e tests. `None` = the profile default.
@@ -151,6 +155,13 @@ def parse_sandbox_config(data: object) -> SandboxConfig:
             raise SandboxConfigError("coverage.paths must be a list of strings")
         coverage = CoverageConfig(min_percent=float(min_pct), paths=tuple(raw_paths))
 
+    risks = None
+    raw_risks = data.get("risks")
+    if raw_risks is not None:
+        if not isinstance(raw_risks, dict) or not all(isinstance(k, str) and isinstance(v, dict) for k, v in raw_risks.items()):
+            raise SandboxConfigError("'risks' must be a dict of dicts")
+        risks = raw_risks
+
     return SandboxConfig(
         database=database,
         env=_as_str_map(data.get("env"), "env"),
@@ -158,6 +169,7 @@ def parse_sandbox_config(data: object) -> SandboxConfig:
         test_command=test_command,
         image=image,
         coverage=coverage,
+        risks=risks,
     )
 
 
