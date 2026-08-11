@@ -97,7 +97,7 @@ def test_load_sandbox_config_risk_override(tmp_path):
     assert config_default is not None
     assert config_default.test_command == "pytest"
 
-    # With non-matching risk override
+    # With non-matching risk override (fallback behavior)
     config_low = load_sandbox_config(tmp_path, risk="low")
     assert config_low is not None
     assert config_low.test_command == "pytest"
@@ -106,6 +106,23 @@ def test_load_sandbox_config_risk_override(tmp_path):
     config_high = load_sandbox_config(tmp_path, risk="high")
     assert config_high is not None
     assert config_high.test_command == "pytest --extended-tests"
+
+
+def test_load_sandbox_config_risk_fallback_when_risk_key_absent(tmp_path):
+    (tmp_path / ".ai-os").mkdir()
+    (tmp_path / ".ai-os" / "sandbox.json").write_text(json.dumps({
+        "test_command": "npm test",
+        "risks": {
+            "medium": {
+                "test_command": "npm run test:medium"
+            }
+        }
+    }))
+
+    # Requesting 'critical' risk which is absent in 'risks' dictionary
+    config = load_sandbox_config(tmp_path, risk="critical")
+    assert config is not None
+    assert config.test_command == "npm test"
 
 
 def test_load_sandbox_config_risk_override_with_languages(tmp_path):
@@ -139,6 +156,19 @@ def test_invalid_risk_entry_raises(tmp_path):
     (tmp_path / ".ai-os" / "sandbox.json").write_text(json.dumps({
         "risks": {
             "high": "not-a-dict"
+        }
+    }))
+    with pytest.raises(SandboxConfigError):
+        load_sandbox_config(tmp_path, risk="high")
+
+
+def test_malformed_risk_entry_with_invalid_field_raises(tmp_path):
+    (tmp_path / ".ai-os").mkdir()
+    (tmp_path / ".ai-os" / "sandbox.json").write_text(json.dumps({
+        "risks": {
+            "high": {
+                "test_command": 12345
+            }
         }
     }))
     with pytest.raises(SandboxConfigError):
