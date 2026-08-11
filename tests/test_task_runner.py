@@ -40,9 +40,13 @@ class _ScriptedSandboxRunner:
     def __init__(self, fail_count: int) -> None:
         self.fail_count = fail_count
         self.calls = 0
+        self.last_risk: str | None = None
 
-    async def run_validation(self, worktree_path: Path, language: str) -> ValidationResult:
+    async def run_validation(
+        self, worktree_path: Path, language: str, risk: str | None = None
+    ) -> ValidationResult:
         self.calls += 1
+        self.last_risk = risk
         if self.calls <= self.fail_count:
             return ValidationResult(
                 success=False, exit_code=1, summary="Validation failed.", output=f"attempt {self.calls} failed"
@@ -268,3 +272,20 @@ async def test_reports_blocked_status_on_exhaustion(git_repo: Path):
     await runner.run_task(_task(max_retries=0), language="python")
 
     assert statuses == [("TASK-1", "RUNNING"), ("TASK-1", "BLOCKED")]
+
+
+async def test_passes_task_risk_level_to_sandbox_runner(git_repo: Path):
+    staging = GitStagingEngine(git_repo)
+    sandbox_runner = _ScriptedSandboxRunner(fail_count=0)
+    runner = TaskRunner(
+        lock_manager=LockManager(),
+        staging=staging,
+        knowledge_engine=KnowledgeEngine(),
+        agent_turn_executor=_make_fake_executor(),
+        sandbox_runner=sandbox_runner,
+    )
+    task = _task(risk_level="HIGH")
+    result = await runner.run_task(task, language="python")
+
+    assert result.status == "COMPLETED"
+    assert sandbox_runner.last_risk == "HIGH"

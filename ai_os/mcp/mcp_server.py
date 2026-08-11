@@ -59,7 +59,9 @@ class SandboxRunner(Protocol):
     fake with a scripted `run_validation` coroutine instead of the real
     Docker-backed implementation."""
 
-    async def run_validation(self, worktree_path: Path, language: str) -> ValidationResult: ...
+    async def run_validation(
+        self, worktree_path: Path, language: str, risk: str | None = None
+    ) -> ValidationResult: ...
 
 
 # -- configuration ---------------------------------------------------------------

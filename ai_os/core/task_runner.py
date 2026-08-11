@@ -329,7 +329,7 @@ class TaskRunner:
                 async def validator(wt_path: Path) -> bool:
                     nonlocal validator_ran, last_output
                     validator_ran = True
-                    result = await self.sandbox_runner.run_validation(wt_path, language)
+                    result = await self.sandbox_runner.run_validation(wt_path, language, risk=task.risk_level)
                     last_output = result.output
                     self._emit(
                         type="validation", task_id=task.id, attempt=attempt,

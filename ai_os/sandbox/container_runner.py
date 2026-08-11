@@ -293,7 +293,9 @@ class EphemeralSandboxRunner:
         # time (they're cached by manifest hash afterwards).
         self.build_timeout_seconds = build_timeout_seconds
 
-    async def run_validation(self, worktree_path: Path, language: str) -> ValidationResult:
+    async def run_validation(
+        self, worktree_path: Path, language: str, risk: str | None = None
+    ) -> ValidationResult:
         """Run `language`'s configured build+test command against
         `worktree_path` (mounted read-only at /app) inside a fresh,
         hardened, ephemeral container.
@@ -313,7 +315,7 @@ class EphemeralSandboxRunner:
             )
 
         try:
-            config = load_sandbox_config(Path(worktree_path), language=language)
+            config = load_sandbox_config(Path(worktree_path), language=language, risk=risk)
         except SandboxConfigError as exc:
             feedback = build_feedback(
                 success=False, exit_code=1, raw_output=f"Invalid .ai-os/sandbox.json: {exc}"
