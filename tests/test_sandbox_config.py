@@ -81,6 +81,70 @@ def test_invalid_json_file_raises(tmp_path):
         load_sandbox_config(tmp_path)
 
 
+def test_load_sandbox_config_risk_override(tmp_path):
+    (tmp_path / ".ai-os").mkdir()
+    (tmp_path / ".ai-os" / "sandbox.json").write_text(json.dumps({
+        "test_command": "pytest",
+        "risks": {
+            "high": {
+                "test_command": "pytest --extended-tests"
+            }
+        }
+    }))
+
+    # Without risk override
+    config_default = load_sandbox_config(tmp_path)
+    assert config_default is not None
+    assert config_default.test_command == "pytest"
+
+    # With non-matching risk override
+    config_low = load_sandbox_config(tmp_path, risk="low")
+    assert config_low is not None
+    assert config_low.test_command == "pytest"
+
+    # With matching risk override
+    config_high = load_sandbox_config(tmp_path, risk="high")
+    assert config_high is not None
+    assert config_high.test_command == "pytest --extended-tests"
+
+
+def test_load_sandbox_config_risk_override_with_languages(tmp_path):
+    (tmp_path / ".ai-os").mkdir()
+    (tmp_path / ".ai-os" / "sandbox.json").write_text(json.dumps({
+        "test_command": "pytest",
+        "languages": {
+            "python": {"test_command": "pytest backend"}
+        },
+        "risks": {
+            "high": {"test_command": "pytest backend --high-risk"}
+        }
+    }))
+
+    config = load_sandbox_config(tmp_path, language="python", risk="high")
+    assert config is not None
+    assert config.test_command == "pytest backend --high-risk"
+
+
+def test_invalid_risks_field_raises(tmp_path):
+    (tmp_path / ".ai-os").mkdir()
+    (tmp_path / ".ai-os" / "sandbox.json").write_text(json.dumps({
+        "risks": "not-a-dict"
+    }))
+    with pytest.raises(SandboxConfigError):
+        load_sandbox_config(tmp_path, risk="high")
+
+
+def test_invalid_risk_entry_raises(tmp_path):
+    (tmp_path / ".ai-os").mkdir()
+    (tmp_path / ".ai-os" / "sandbox.json").write_text(json.dumps({
+        "risks": {
+            "high": "not-a-dict"
+        }
+    }))
+    with pytest.raises(SandboxConfigError):
+        load_sandbox_config(tmp_path, risk="high")
+
+
 # -- DB-aware argv (internal network + injected env) -------------------------
 
 

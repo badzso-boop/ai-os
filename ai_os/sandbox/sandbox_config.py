@@ -161,7 +161,11 @@ def parse_sandbox_config(data: object) -> SandboxConfig:
     )
 
 
-def load_sandbox_config(worktree_path: Path, language: str | None = None) -> SandboxConfig | None:
+def load_sandbox_config(
+    worktree_path: Path,
+    language: str | None = None,
+    risk: str | None = None,
+) -> SandboxConfig | None:
     """Load `<worktree>/.ai-os/sandbox.json` if present, else `None`. Raises
     `SandboxConfigError` if the file exists but is malformed.
 
@@ -198,8 +202,26 @@ def load_sandbox_config(worktree_path: Path, language: str | None = None) -> San
             sub = per_language[language]
             if not isinstance(sub, dict):
                 raise SandboxConfigError(f"languages.{language} must be an object")
-            return parse_sandbox_config({**shared, **sub})
-        # A task in a language the map doesn't cover falls back to shared defaults
-        # (or None when there are none) — so it isn't accidentally DB-validated.
-        return parse_sandbox_config(shared) if shared else None
-    return parse_sandbox_config(data)
+            merged = {**shared, **sub}
+        else:
+            # A task in a language the map doesn't cover falls back to shared defaults
+            # (or None when there are none) — so it isn't accidentally DB-validated.
+            merged = dict(shared) if shared else {}
+    else:
+        merged = dict(data)
+
+    if not merged and per_language is not None:
+        return None
+
+    if risk is not None:
+        risks = data.get("risks")
+        if risks is not None:
+            if not isinstance(risks, dict):
+                raise SandboxConfigError("'risks' must be an object")
+            if risk in risks:
+                risk_override = risks[risk]
+                if not isinstance(risk_override, dict):
+                    raise SandboxConfigError(f"risks.{risk} must be an object")
+                merged.update(risk_override)
+
+    return parse_sandbox_config(merged)
