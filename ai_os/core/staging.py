@@ -195,35 +195,59 @@ class GitStagingEngine:
         wt_path = self._worktree_path(task_id)
         branch = self._branch_name(task_id)
 
+        # 1. Commit whatever is in the worktree, tolerating "nothing to
+        #    commit" (a no-op retry should still be able to proceed).
+        await self._run_git(["add", "."], wt_path)
+        _, status_out, _ = await self._run_git(
+            ["status", "--porcelain"], wt_path, check=False
+        )
+        if status_out.strip():
+            await self._run_git(["commit", "-m", commit_message], wt_path)
+
+        # 2. Pre-validate on the task's un-rebased worktree before acquiring _merge_lock.
+        #    This allows sandbox validation to run concurrently for independent tasks.
+        try:
+            is_valid = await validator_callback(wt_path)
+        except Exception as exc:
+            raise ValidationCallbackError(task_id) from exc
+        if not is_valid:
+            return False
+
+        # 3. Acquire _merge_lock to serialize rebase, re-validation (if base moved), and fast-forward merge.
         async with self._merge_lock:
-            # 1. Commit whatever is in the worktree, tolerating "nothing to
-            #    commit" (a no-op retry should still be able to proceed).
-            await self._run_git(["add", "."], wt_path)
-            _, status_out, _ = await self._run_git(
-                ["status", "--porcelain"], wt_path, check=False
+            # Check if base_branch has moved relative to our current commit
+            rc, rev_branch, _ = await self._run_git(
+                ["rev-parse", "HEAD"], wt_path, check=False
             )
-            if status_out.strip():
-                await self._run_git(["commit", "-m", commit_message], wt_path)
+            rc_base, rev_base, _ = await self._run_git(
+                ["rev-parse", self.base_branch], self.repo_root, check=False
+            )
+            base_moved = (
+                rc == 0
+                and rc_base == 0
+                and rev_branch.strip() != rev_base.strip()
+            )
 
-            # 2. Rebase onto the base branch to pick up any prior task's merge.
-            rc, _, _ = await self._run_git(
-                ["rebase", self.base_branch], wt_path, check=False
-            )
-            if rc != 0:
-                await self._run_git(
-                    ["rebase", "--abort"], wt_path, check=False
+            if base_moved:
+                # Rebase onto the base branch to pick up any prior task's merge.
+                rc, _, _ = await self._run_git(
+                    ["rebase", self.base_branch], wt_path, check=False
                 )
-                return False
+                if rc != 0:
+                    await self._run_git(
+                        ["rebase", "--abort"], wt_path, check=False
+                    )
+                    return False
 
-            # 3. Re-validate on the rebased tree. Distinguish "validator
-            #    says no" (expected -> False) from "validator itself
-            #    broke" (infra fault -> raise).
-            try:
-                is_valid = await validator_callback(wt_path)
-            except Exception as exc:
-                raise ValidationCallbackError(task_id) from exc
-            if not is_valid:
-                return False
+                # Re-validate on the rebased tree. Distinguish "validator
+                # says no" (expected -> False) from "validator itself
+                # broke" (infra fault -> raise).
+                try:
+                    is_valid = await validator_callback(wt_path)
+                except Exception as exc:
+                    raise ValidationCallbackError(task_id) from exc
+                if not is_valid:
+                    return False
 
             # 4. Fast-forward-only merge into the base branch. See module
             #    docstring for why this checks out the base branch in repo_root
