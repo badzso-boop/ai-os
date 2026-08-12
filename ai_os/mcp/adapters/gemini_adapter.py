@@ -48,6 +48,11 @@ from ai_os.mcp.adapters.base_adapter import (
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
+# Locks the CLI-session subprocess down to a pure prompt-in/text-out call —
+# matches Anthropic adapter tool lockdown behavior.
+DISALLOWED_TOOLS = "Bash Edit Write NotebookEdit Read Glob Grep WebFetch WebSearch"
+
+
 
 class GeminiCliError(RuntimeError):
     """The `agy` CLI subprocess failed, or reported non-SUCCESS status."""
@@ -126,9 +131,10 @@ class GeminiAdapter(BaseMCPAdapter):
             prompt,
             "--output-format",
             "json",
-            "--mode",
-            "accept-edits",
-            "--dangerously-skip-permissions",
+            "--permission-mode",
+            "plan",
+            "--disallowedTools",
+            DISALLOWED_TOOLS,
         ]
         if model:
             argv += ["--model", model]

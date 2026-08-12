@@ -175,3 +175,58 @@ async def test_malformed_candidate_shape_raises_gemini_api_error_not_keyerror():
 
     with pytest.raises(GeminiApiError):
         await adapter.execute_task(request)
+
+
+# -- CLI-session mode tests ---------------------------------------------------
+
+
+def _write_fake_cli(tmp_path, script_body: str):
+    import stat
+    script_path = tmp_path / "fake_agy.py"
+    script_path.write_text(script_body)
+    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return script_path
+
+
+def _argv_capturing_stub(tmp_path, response_json: dict, exit_code: int = 0):
+    argv_log = tmp_path / "argv.json"
+    response_text = json.dumps(response_json)
+    script = f"""#!/usr/bin/env python3
+import json
+import sys
+
+with open({str(argv_log)!r}, "w") as f:
+    json.dump(sys.argv, f)
+
+print({response_text!r})
+sys.exit({exit_code})
+"""
+    return _write_fake_cli(tmp_path, script)
+
+
+def _read_argv_log(tmp_path) -> list[str]:
+    return json.loads((tmp_path / "argv.json").read_text())
+
+
+async def test_cli_session_builds_locked_down_argv(tmp_path):
+    from ai_os.mcp.adapters.gemini_adapter import DISALLOWED_TOOLS
+    fake_response = {"status": "SUCCESS", "response": "hello from cli", "usage": {"input_tokens": 10, "output_tokens": 20}}
+    stub = _argv_capturing_stub(tmp_path, fake_response)
+    adapter = GeminiAdapter(gemini_cli=str(stub), use_cli_session=True)
+
+    request = LLMTaskRequest(task_id="t10", context_payload="hello")
+    response = await adapter.execute_task(request)
+
+    assert response.generated_text == "hello from cli"
+    argv = _read_argv_log(tmp_path)
+    assert "--permission-mode" in argv
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert "--disallowedTools" in argv
+    assert argv[argv.index("--disallowedTools") + 1] == DISALLOWED_TOOLS
+    assert "-p" in argv
+    assert argv[argv.index("-p") + 1] == "hello"
+    assert "--output-format" in argv
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert "--mode" not in argv
+    assert "--dangerously-skip-permissions" not in argv
+
