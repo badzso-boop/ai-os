@@ -71,6 +71,31 @@ def _as_setup_failure(result: ValidationResult) -> ValidationResult:
     )
 
 
+# Marker echoed between setup_commands and the test command when they're
+# combined into ONE container run (see _combined_setup_and_test_command) -
+# lets us still tell "setup failed" from "tests failed" apart even though
+# there's no longer a separate container boundary between them.
+_SETUP_DONE_MARKER = "<<AI-OS-SETUP-DONE>>"
+
+
+def _combined_setup_and_test_command(setup_commands: tuple[str, ...], test_command: str) -> str:
+    """Join setup_commands + the test command into a single shell command,
+    `&&`-chained so a setup failure short-circuits before the tests run,
+    with a marker echoed in between so the two are still distinguishable in
+    the output after the fact."""
+    return " && ".join(setup_commands) + f" && echo '{_SETUP_DONE_MARKER}' && " + test_command
+
+
+def _split_combined_result(result: ValidationResult) -> ValidationResult:
+    """Re-label a failed combined setup+test run as a setup failure if the
+    marker never appears in the output (setup itself failed, `&&`
+    short-circuited before the marker's echo) - otherwise leave it as a
+    genuine test failure."""
+    if result.success or _SETUP_DONE_MARKER in result.output:
+        return result
+    return _as_setup_failure(result)
+
+
 @dataclass
 class ValidationResult:
     success: bool
@@ -412,7 +437,26 @@ class EphemeralSandboxRunner:
         container. Honors an optional (DB-less) `.ai-os/sandbox.json`'s env,
         setup_commands, test_command override, and coverage gate."""
         extra_env = tuple(config.env.items()) if config is not None else ()
+        command = self._effective_command(profile, config, default_command, language)
         if config is not None and config.setup_commands:
+            if not mount:
+                # Copy-isolation (Node): setup_commands and the test command
+                # MUST run in the SAME container. Each `_run_phase` call is a
+                # fresh, separate `--rm` container from the same image - a
+                # setup step that writes local generated files (the
+                # prototypical case: `prisma generate` writing into
+                # node_modules) would otherwise have those writes silently
+                # discarded when its container exits, and the test container
+                # would start from the original, pre-setup image state as if
+                # setup never ran. See the comment on _combined_setup_and_test_command.
+                resolved_test = command if command is not None else profile.command
+                combined = await self._run_phase(
+                    worktree_path, profile, image, network="none", extra_env=extra_env,
+                    command=_combined_setup_and_test_command(tuple(config.setup_commands), resolved_test),
+                    timeout=self.build_timeout_seconds + self.timeout_seconds,
+                    name_prefix="ai-os-setup", mount=mount,
+                )
+                return _split_combined_result(combined)
             setup = await self._run_phase(
                 worktree_path, profile, image, network="none", extra_env=extra_env,
                 command=" && ".join(config.setup_commands),
@@ -420,7 +464,6 @@ class EphemeralSandboxRunner:
             )
             if not setup.success:
                 return _as_setup_failure(setup)
-        command = self._effective_command(profile, config, default_command, language)
         return await self._run_phase(
             worktree_path, profile, image, network="none", extra_env=extra_env,
             command=command, timeout=self.timeout_seconds, mount=mount,
@@ -444,7 +487,21 @@ class EphemeralSandboxRunner:
 
         try:
             extra_env = tuple(config.env.items())
+            command = self._effective_command(profile, config, default_command, language)
             if config.setup_commands:
+                if not mount:
+                    # Copy-isolation: same reasoning as _run_isolated - a
+                    # setup step's local filesystem writes (e.g. `prisma
+                    # generate`) must run in the SAME container as the test
+                    # command, not a separate one that then gets discarded.
+                    resolved_test = command if command is not None else profile.command
+                    combined = await self._run_phase(
+                        worktree_path, profile, image, network=running.network, extra_env=extra_env,
+                        command=_combined_setup_and_test_command(tuple(config.setup_commands), resolved_test),
+                        timeout=self.build_timeout_seconds + self.timeout_seconds,
+                        name_prefix="ai-os-setup", mount=mount,
+                    )
+                    return _split_combined_result(combined)
                 setup = await self._run_phase(
                     worktree_path, profile, image, network=running.network, extra_env=extra_env,
                     command=" && ".join(config.setup_commands),
@@ -452,7 +509,6 @@ class EphemeralSandboxRunner:
                 )
                 if not setup.success:
                     return _as_setup_failure(setup)
-            command = self._effective_command(profile, config, default_command, language)
             return await self._run_phase(
                 worktree_path, profile, image, network=running.network, extra_env=extra_env,
                 command=command, timeout=self.timeout_seconds, mount=mount,

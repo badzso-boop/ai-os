@@ -68,3 +68,48 @@ async def test_failing_vitest_reports_failure(tmp_path):
     runner = EphemeralSandboxRunner(timeout_seconds=180.0, build_timeout_seconds=600.0)
     result = await runner.run_validation(tmp_path, "typescript")
     assert result.success is False
+
+
+async def test_setup_command_local_file_write_is_visible_to_test_command(tmp_path):
+    """A `.ai-os/sandbox.json` `setup_commands` step that writes a local file
+    (the Prisma-generate-into-node_modules pattern) must be visible to the
+    test command that runs afterward - proving they share ONE container's
+    filesystem under copy-isolation, not two separate `--rm` containers
+    where the setup step's writes would be silently discarded."""
+    (tmp_path / "package.json").write_text(json.dumps({
+        "name": "setuptest",
+        "version": "1.0.0",
+        "scripts": {"test": "vitest run"},
+        "devDependencies": {"vitest": "^2.1.0"},
+    }))
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    (tmp_path / "consumer.test.ts").write_text(
+        "import { test, expect } from 'vitest';\n"
+        "import { generated } from './generated';\n"
+        "test('sees the setup-generated file', () => { expect(generated).toBe(42); });\n"
+    )
+    ai_os_dir = tmp_path / ".ai-os"
+    ai_os_dir.mkdir()
+    (ai_os_dir / "sandbox.json").write_text(json.dumps({
+        "setup_commands": ["echo 'export const generated = 42;' > generated.ts"],
+    }))
+
+    runner = EphemeralSandboxRunner(timeout_seconds=180.0, build_timeout_seconds=600.0)
+    result = await runner.run_validation(tmp_path, "typescript")
+    assert result.success is True, f"expected pass, got:\n{result.output}"
+
+
+async def test_setup_command_failure_still_reported_as_setup_failure(tmp_path):
+    """The setup-vs-test failure distinction must survive the combined
+    single-container run (via the echoed marker), not just plain success."""
+    _vitest_project(tmp_path, package_manager="npm")
+    ai_os_dir = tmp_path / ".ai-os"
+    ai_os_dir.mkdir()
+    (ai_os_dir / "sandbox.json").write_text(json.dumps({
+        "setup_commands": ["exit 1"],
+    }))
+
+    runner = EphemeralSandboxRunner(timeout_seconds=180.0, build_timeout_seconds=600.0)
+    result = await runner.run_validation(tmp_path, "typescript")
+    assert result.success is False
+    assert "setup/seed failed" in result.output.lower()
