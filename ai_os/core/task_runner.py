@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 from ai_os.core.conventions import conventions_block
 from ai_os.core.lock_manager import LockManager
 from ai_os.core.models import TaskNode
-from ai_os.core.staging import GitStagingEngine
+from ai_os.core.staging import GitStagingEngine, ValidationCallbackError
 from ai_os.core.test_quality import TestPresenceReport, assess_test_presence
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import (
@@ -338,9 +338,26 @@ class TaskRunner:
                     )
                     return result.success
 
-                merged = await self.staging.stage_and_merge_task(
-                    task.id, f"{task.id}: attempt {attempt}", validator
-                )
+                try:
+                    merged = await self.staging.stage_and_merge_task(
+                        task.id, f"{task.id}: attempt {attempt}", validator
+                    )
+                except ValidationCallbackError as exc:
+                    # The validator itself broke (infra fault, e.g. an
+                    # unsupported sandbox language) rather than reporting a
+                    # normal pass/fail — this is deterministic, so retrying
+                    # the same task would just fail identically. Go straight
+                    # to BLOCKED (same policy as AgentUsageLimitError above)
+                    # instead of letting it crash the whole epic run and take
+                    # down any sibling tasks running concurrently in this
+                    # batch.
+                    detail = str(exc.__cause__) if exc.__cause__ else str(exc)
+                    self._emit(
+                        type="agent_error", task_id=task.id, attempt=attempt,
+                        error=detail, fatal=True,
+                    )
+                    last_output = f"Validation infra error: {detail}"
+                    break
                 if merged:
                     self._emit(type="merged", task_id=task.id, attempt=attempt)
                     await self._report_status(task.id, "COMPLETED")
