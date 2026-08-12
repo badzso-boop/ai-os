@@ -704,7 +704,7 @@ def scaffold_files(preset: str, with_db: bool = False) -> dict[str, str]:
             "src/lib/slug.test.ts": _NEXT_LIB_TEST,
             "prisma/schema.prisma": _prisma_schema(with_db),
             ".gitignore": _GITIGNORE_NODE + ".next/\n",
-            "README.md": _readme("Next.js + Prisma app", "Typecheck: `npm run typecheck`."),
+            "README.md": _readme("Next.js + Prisma app", "Typecheck: `npm run typecheck`. Test: `npm test`."),
         }
         if with_db:
             files["prisma/seed.ts"] = _PRISMA_SEED
@@ -715,13 +715,13 @@ def scaffold_files(preset: str, with_db: bool = False) -> dict[str, str]:
                     "npx prisma db push --accept-data-loss --skip-generate",
                     "npx tsx prisma/seed.ts",
                 ],
-                test_command="npm run typecheck",
+                test_command="npm test",
             )
         else:
             files[".ai-os/sandbox.json"] = _dumps({
                 "env": {"DATABASE_URL": "postgresql://app:app@localhost:5432/app"},
                 "setup_commands": ["npx prisma generate"],
-                "test_command": "npm run typecheck",
+                "test_command": "npm test",
             })
         return files
 
@@ -748,7 +748,7 @@ def scaffold_files(preset: str, with_db: bool = False) -> dict[str, str]:
         files["package.json"] = _react_package_json("frontend", "tsc --noEmit", "src")
         files[".gitignore"] = _GITIGNORE_NODE
         files["README.md"] = _readme("React (Vite + TS) app", "Typecheck: `npm run typecheck`. Test: `npm test`.")
-        files[".ai-os/sandbox.json"] = '{ "test_command": "npm run typecheck" }\n'
+        files[".ai-os/sandbox.json"] = _dumps({"test_command": "npm test"})
         return files
 
     if preset == "fastapi-react":
@@ -776,7 +776,7 @@ def scaffold_files(preset: str, with_db: bool = False) -> dict[str, str]:
             "- Keep dependency manifests at the repo root (`requirements.txt`, "
             "`package.json`) so the sandbox can install them.\n"
         )
-        ts_cfg = {"test_command": "npm run typecheck"}
+        ts_cfg = {"test_command": "npm test"}
         if with_db:
             files["requirements.txt"] = _FASTAPI_REQS + "psycopg2-binary\n"
             files["backend/scripts/seed.py"] = _PY_DB_SEED
