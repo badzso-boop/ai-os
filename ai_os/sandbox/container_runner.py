@@ -53,6 +53,7 @@ from ai_os.sandbox.node_toolchain import (
     NODE_MANIFESTS,
     build_copy_dockerfile,
     detect_node_package_manager,
+    discover_node_manifests,
     node_install_command,
     node_test_command,
 )
@@ -634,10 +635,15 @@ class EphemeralSandboxRunner:
         validation failure with the build log, not a crash. The image is tagged
         uniquely (the code changes each run) and cleaned up by the caller."""
         worktree = Path(worktree_path).resolve()
-        present = [m for m in profile.dependency_manifests if (worktree / m).is_file()]
         if language in NODE_LANGUAGES:
+            # Workspace-aware: a plain package.json/lockfile pair isn't enough
+            # for a pnpm/yarn/npm monorepo - see discover_node_manifests()'s
+            # docstring for why a root-only copy silently breaks `pnpm
+            # install` for every workspace member.
+            present = discover_node_manifests(worktree)
             install = node_install_command(detect_node_package_manager(worktree))
         else:
+            present = [m for m in profile.dependency_manifests if (worktree / m).is_file()]
             install = profile.install_command or "true"
         dockerfile = build_copy_dockerfile(profile.image, present, install)
         tag = f"ai-os-sandbox-copy:{uuid.uuid4().hex[:16]}"
