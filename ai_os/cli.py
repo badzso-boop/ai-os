@@ -45,6 +45,8 @@ from ai_os.mcp.adapters.base_adapter import LLMTaskRequest
 from ai_os.mcp.config import load_configured_adapters
 from ai_os.mcp.protocol_router import ProtocolRouter, risk_provider_order_from_env
 from ai_os.sandbox.container_runner import EphemeralSandboxRunner
+from ai_os.core.wizard import run_wizard
+from ai_os.core.onboarding import scan_and_generate_configs
 
 console = Console()
 
@@ -54,6 +56,12 @@ _LANGUAGE_CHOICES = sorted(["python", "javascript", "typescript", "java"])
 @click.group()
 def main() -> None:
     """AI-OS — deterministic Polyglot Analyzer & Knowledge Graph (Phase 1)."""
+
+
+@main.command("wizard")
+def wizard() -> None:
+    """Run the interactive post-install setup and diagnostic wizard."""
+    run_wizard()
 
 
 @main.command("clean")
@@ -197,12 +205,22 @@ def project() -> None:
 @click.argument("name")
 @click.argument("path")
 @click.option("--force", is_flag=True, help="Overwrite an existing registration with this name.")
-def project_add(name: str, path: str, force: bool) -> None:
+@click.option("--deep-scan", "deep_scan", is_flag=True, default=None, help="Perform deep scan of codebase stubs and AST.")
+def project_add(name: str, path: str, force: bool, deep_scan: bool | None) -> None:
     try:
         entry = registry.add(name, path, force=force)
     except (registry.InvalidProjectNameError, registry.ProjectPathError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
+
+    if deep_scan is None:
+        try:
+            deep_scan = click.confirm("Perform deep scan of codebase?", default=False)
+        except click.Abort:
+            deep_scan = False
+
+    scan_and_generate_configs(entry.path, use_deep_scan=deep_scan)
     console.print(f"[green]Registered[/green] {entry.name} -> {entry.path}")
+    click.echo(f"Project '{entry.name}' added at {Path(entry.path).resolve()}.")
 
 
 @project.command("remove")
@@ -620,70 +638,93 @@ def _print_plan_table(tasks, assignments, estimate=None) -> None:
             console.print("  " + "  ·  ".join(notes))
 
 
-def _make_event_printer(verbose: bool):
+def _make_event_printer(verbose: bool = False, console: Console | None = None):
     """Return an `on_event` callback that renders the structured run events
     (attempt, agent turn, sandbox validation, retry, merge) so the run is
     debuggable instead of a black box. `verbose` dumps the full sandbox output
     on failure; otherwise just the tail."""
 
     def printer(ev: dict) -> None:
+        con = console if console is not None else globals()["console"]
         t = ev.get("type")
         tid = ev.get("task_id", "?")
-        if t == "attempt":
+        if t == "task_execution":
+            status = ev.get("status", "")
+            message = ev.get("message", "")
+            cost_val = ev.get("cost")
+            elapsed_val = ev.get("elapsed")
+            cost_str = f"${cost_val:.4f}" if isinstance(cost_val, (int, float)) else str(cost_val or "")
+            elapsed_str = f"{elapsed_val:.2f}s" if isinstance(elapsed_val, (int, float)) else str(elapsed_val or "")
+
+            lines = [
+                f"Status: {status}",
+                f"Message: {message}",
+                f"Elapsed: {elapsed_str}",
+                f"Cost: {cost_str}",
+            ]
+            for k, v in ev.items():
+                if k not in {"type", "task_id", "status", "message", "cost", "elapsed"}:
+                    lines.append(f"{k}: {v}")
+
+            con.print(Panel("\n".join(lines), title=f"Task [{tid}] - {t.upper()}", expand=False))
+        elif t == "attempt":
             files = ", ".join(ev.get("target_files") or []) or "(inferred)"
-            console.print(
+            con.print(
                 f"[cyan]▶ {tid}[/cyan] attempt {ev['attempt']}/{ev['max_attempts']} — "
                 f"{ev.get('title', '')}  [dim]→ {files}[/dim]"
             )
         elif t == "agent_turn":
             usd = ev.get("usd") or 0.0
             cost = f" · ${usd:.4f}" if usd else ""
-            console.print(
+            con.print(
                 f"  [dim]{tid} · agent: {ev.get('provider')}→{ev.get('model')} · "
                 f"{ev.get('input_tokens', 0)}in/{ev.get('output_tokens', 0)}out tok{cost}[/dim]"
             )
         elif t == "validation":
             if ev.get("success"):
-                console.print(f"  [green]✓ {tid} sandbox passed[/green] (exit {ev.get('exit_code')})")
+                con.print(f"  [green]✓ {tid} sandbox passed[/green] (exit {ev.get('exit_code')})")
             else:
-                console.print(
+                con.print(
                     f"  [red]✗ {tid} sandbox FAILED[/red] (exit {ev.get('exit_code')}) — "
                     f"{ev.get('summary', '')}"
                 )
                 out = (ev.get("output") or "").strip()
                 if out:
                     tail = out if verbose else "\n".join(out.splitlines()[-12:])
-                    console.print(Panel(
+                    con.print(Panel(
                         tail, title=f"{tid} sandbox output{'' if verbose else ' (tail)'}",
                         border_style="red", expand=False,
                     ))
         elif t == "merge_conflict":
-            console.print(f"  [yellow]⚠ {tid} merge conflict[/yellow] — {ev.get('output', '')}")
+            con.print(f"  [yellow]⚠ {tid} merge conflict[/yellow] — {ev.get('output', '')}")
         elif t == "agent_error":
-            console.print(f"  [red]⚠ {tid} agent error[/red] — {ev.get('error', '')}")
+            con.print(f"  [red]⚠ {tid} agent error[/red] — {ev.get('error', '')}")
         elif t == "retry":
-            console.print(f"  [yellow]↻ {tid} retrying (attempt {ev.get('next_attempt')})[/yellow]")
+            con.print(f"  [yellow]↻ {tid} retrying (attempt {ev.get('next_attempt')})[/yellow]")
         elif t == "merged":
-            console.print(f"  [green]✓ {tid} merged[/green]")
+            con.print(f"  [green]✓ {tid} merged[/green]")
         elif t == "test_quality":
             if ev.get("missing_tests"):
-                console.print(f"  [yellow]⚠ {tid} no test added for a code change[/yellow]")
+                con.print(f"  [yellow]⚠ {tid} no test added for a code change[/yellow]")
             if ev.get("sensitive_files"):
-                console.print(
+                con.print(
                     f"  [yellow]🔐 {tid} touches CI/sensitive config[/yellow] — "
                     f"{', '.join(ev['sensitive_files'])} [dim](not self-certifying — review the diff)[/dim]"
                 )
         elif t == "test_critique":
             verdict = ev.get("verdict", "UNKNOWN")
             color = {"STRONG": "green", "WEAK": "yellow", "MISSING": "red"}.get(verdict, "yellow")
-            console.print(f"  [{color}]🔎 {tid} test critic: {verdict}[/{color}]")
+            con.print(f"  [{color}]🔎 {tid} test critic: {verdict}[/{color}]")
             if verdict not in {"STRONG"} and verbose:
-                console.print(Panel(
+                con.print(Panel(
                     (ev.get("critique") or "").strip(), title=f"{tid} test critique",
                     border_style=color, expand=False,
                 ))
 
     return printer
+
+
+printer = _make_event_printer(verbose=False)
 
 
 @epic.command("run")
