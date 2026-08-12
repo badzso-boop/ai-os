@@ -129,6 +129,33 @@ def test_falls_back_to_default_when_undeterminable():
     assert resolve_task_language(_t("D", ["notes.txt"]), "python") == "python"
 
 
+def test_sandbox_unsupported_extension_votes_are_dropped():
+    # A Prisma schema change task whose only recognized-extension file is a
+    # raw .sql migration: the analyzer recognizes "sql" as a language, but
+    # the sandbox has no profile for it. The vote must be dropped rather than
+    # "winning" and later crashing SandboxLanguageNotSupportedError deep in
+    # validation — this should fall back to the epic's default language.
+    task = _t("E", ["prisma/migrations/0001/migration.sql", "prisma/schema.prisma"])
+    assert resolve_task_language(task, "typescript") == "typescript"
+
+
+def test_explicit_unsupported_task_language_falls_back_too():
+    # Same story if the epic planner itself set an unsupported language
+    # explicitly rather than it being inferred from file extensions.
+    task = _t("F", ["schema.sql"], language="sql")
+    assert resolve_task_language(task, "typescript") == "typescript"
+
+
+def test_sandbox_supported_language_still_wins_over_unsupported_sibling():
+    # A task touching both a .ts file and a .sql migration should still
+    # resolve to typescript (the supported one), not fall through to default.
+    task = _t(
+        "G",
+        ["src/db/migrate.sql", "src/server/domains/foo/foo.service.ts"],
+    )
+    assert resolve_task_language(task, "python") == "typescript"
+
+
 # -- per-language sandbox config ---------------------------------------------
 
 

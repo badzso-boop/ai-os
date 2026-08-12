@@ -50,6 +50,19 @@ class _ScriptedSandboxRunner:
         return ValidationResult(success=True, exit_code=0, summary="Validation passed.", output="ok")
 
 
+class _ExplodingSandboxRunner:
+    """Simulates the validator itself breaking (e.g.
+    SandboxLanguageNotSupportedError) rather than reporting a pass/fail —
+    every call raises."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run_validation(self, worktree_path: Path, language: str) -> ValidationResult:
+        self.calls += 1
+        raise RuntimeError(f"No sandbox profile configured for language {language!r}")
+
+
 def _make_fake_executor(filename: str = "output.txt"):
     calls: list[AgentTurnContext] = []
 
@@ -268,3 +281,29 @@ async def test_reports_blocked_status_on_exhaustion(git_repo: Path):
     await runner.run_task(_task(max_retries=0), language="python")
 
     assert statuses == [("TASK-1", "RUNNING"), ("TASK-1", "BLOCKED")]
+
+
+async def test_validator_infra_error_blocks_without_retry_or_crash(git_repo: Path):
+    # A validator that raises (ValidationCallbackError, e.g. an unsupported
+    # sandbox language) must BLOCK the task on the first attempt, without
+    # retrying (it's deterministic — retrying would just fail identically)
+    # and without the exception propagating out of run_task and crashing the
+    # whole epic run.
+    staging = GitStagingEngine(git_repo)
+    statuses: list[tuple[str, str]] = []
+    sandbox = _ExplodingSandboxRunner()
+    runner = TaskRunner(
+        lock_manager=LockManager(),
+        staging=staging,
+        knowledge_engine=KnowledgeEngine(),
+        agent_turn_executor=_make_fake_executor(),
+        sandbox_runner=sandbox,
+        on_status_change=lambda task_id, status: statuses.append((task_id, status)),
+    )
+    result = await runner.run_task(_task(max_retries=3), language="sql")
+
+    assert statuses == [("TASK-1", "RUNNING"), ("TASK-1", "BLOCKED")]
+    assert result.status == "BLOCKED"
+    assert result.attempts == 1  # no retry against a deterministic infra fault
+    assert sandbox.calls == 1
+    assert "sql" in result.final_output

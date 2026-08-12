@@ -50,7 +50,7 @@ from ai_os.core.conventions import load_project_conventions
 from ai_os.core.scheduling_policy import BudgetExceededError, SchedulingPolicy
 from ai_os.knowledge.graph_engine import KnowledgeEngine
 from ai_os.mcp.adapters.base_adapter import BaseMCPAdapter
-from ai_os.sandbox.container_runner import EphemeralSandboxRunner
+from ai_os.sandbox.container_runner import SANDBOX_PROFILES, EphemeralSandboxRunner
 
 if TYPE_CHECKING:
     from ai_os.core.persistence import Persistence
@@ -80,19 +80,31 @@ class EpicRunResult:
 
 
 def resolve_task_language(task: TaskNode, default_language: str) -> str:
-    """The language a task validates as. Explicit `task.language` wins; else it's
-    derived from the task's file extensions (majority vote across write_set +
-    target_files); else the epic's default. This is what lets ONE epic span a
-    Python backend + a TypeScript frontend — each task gets its own sandbox
-    profile."""
-    if task.language:
+    """The language a task validates as. Explicit `task.language` wins if it's
+    one the sandbox actually has a profile for; else it's derived from the
+    task's file extensions (majority vote across write_set + target_files,
+    counting ONLY sandbox-supported languages); else the epic's default. This
+    is what lets ONE epic span a Python backend + a TypeScript frontend — each
+    task gets its own sandbox profile.
+
+    `detect_language` (the Phase-1 analyzer) recognizes more languages (sql,
+    html, css, ...) than `SANDBOX_PROFILES` has validation profiles for
+    (java/javascript/python/typescript) — e.g. a schema-migration task whose
+    only recognized-extension file is a `.sql` migration would otherwise "win"
+    the vote with a language the sandbox can't run at all, crashing the whole
+    epic run with SandboxLanguageNotSupportedError instead of just validating
+    as the epic's actual (default) language. Votes for an unsupported language
+    are dropped rather than counted, and an explicit-but-unsupported
+    `task.language` is treated the same as if none were set.
+    """
+    if task.language and task.language in SANDBOX_PROFILES:
         return task.language
     from pathlib import Path as _P
 
     votes: dict[str, int] = {}
     for path in list(task.write_set) + list(task.target_files):
         lang = detect_language(_P(path))
-        if lang is not None:
+        if lang is not None and lang in SANDBOX_PROFILES:
             votes[lang] = votes.get(lang, 0) + 1
     if votes:
         return max(votes, key=votes.get)
