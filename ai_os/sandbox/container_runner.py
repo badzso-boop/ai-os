@@ -293,6 +293,28 @@ class EphemeralSandboxRunner:
         # run: `pip install`/`npm install`/`mvn go-offline` can be slow the first
         # time (they're cached by manifest hash afterwards).
         self.build_timeout_seconds = build_timeout_seconds
+        # Two epic tasks in the same batch (asyncio.gather) routinely have
+        # IDENTICAL dependency manifests (neither touched package.json/
+        # requirements.txt/pom.xml) and so build content-identical phase-1
+        # Docker layers concurrently. `docker build` has no built-in
+        # concurrency guard for two builds racing the SAME uncached layer —
+        # observed in practice as a task getting a corrupted/incomplete
+        # dependency image (e.g. a Node install whose postinstall-generated
+        # Prisma Client came out missing types) with no build error at all,
+        # since each build "succeeds" individually while stomping on the
+        # other's cache writes. Serializing same-content builds via this
+        # per-instance lock (keyed by the same content hash used for the
+        # mount-isolation image tag, or an equivalent hash for copy-isolation)
+        # makes the first build populate the cache and every concurrent
+        # sibling either reuse it or safely rebuild after, instead of racing.
+        self._build_locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, key: str) -> asyncio.Lock:
+        lock = self._build_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._build_locks[key] = lock
+        return lock
 
     async def run_validation(self, worktree_path: Path, language: str) -> ValidationResult:
         """Run `language`'s configured build+test command against
@@ -560,6 +582,16 @@ class EphemeralSandboxRunner:
             hasher.update((worktree_path / name).read_bytes())
         tag = f"ai-os-sandbox-dep:{hasher.hexdigest()[:16]}"
 
+        # Serialize builds sharing this exact tag: two tasks with identical
+        # manifests (the common case within a batch) would otherwise both see
+        # "doesn't exist yet" and race `docker build -t <same tag>`
+        # concurrently. See the comment on `_build_locks` in __init__.
+        async with self._lock_for(tag):
+            return await self._build_and_tag_dependency_image(profile, worktree_path, manifests, tag)
+
+    async def _build_and_tag_dependency_image(
+        self, profile: SandboxProfile, worktree_path: Path, manifests: list[str], tag: str
+    ) -> tuple[str, ValidationResult | None]:
         if await self._image_exists(tag):
             return tag, None
 
@@ -648,37 +680,57 @@ class EphemeralSandboxRunner:
         dockerfile = build_copy_dockerfile(profile.image, present, install)
         tag = f"ai-os-sandbox-copy:{uuid.uuid4().hex[:16]}"
 
-        with tempfile.TemporaryDirectory(prefix="ai-os-copybuild-") as tmp_dir:
-            dockerfile_path = Path(tmp_dir) / "Dockerfile"
-            dockerfile_path.write_text(dockerfile, encoding="utf-8")
-            proc = await asyncio.create_subprocess_exec(
-                self.docker_cli, "build", "-t", tag, "-f", str(dockerfile_path), str(worktree),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            try:
-                out, _ = await asyncio.wait_for(
-                    proc.communicate(), timeout=self.build_timeout_seconds
+        # The final tag is always unique (a fresh code layer every run), but
+        # the DEPS LAYER underneath it is content-identical across any two
+        # tasks with the same manifests - and Docker's build cache is shared
+        # at the daemon level regardless of the final tag. Lock on that
+        # shared content, not the tag, so concurrent identical-deps builds
+        # (the common case: two tasks in the same batch, neither touching
+        # package.json/pnpm-lock.yaml) serialize instead of racing the same
+        # uncached `RUN <install>` layer. See `_build_locks` in __init__.
+        deps_hasher = hashlib.sha256()
+        deps_hasher.update(profile.image.encode())
+        deps_hasher.update(b"\n")
+        deps_hasher.update(install.encode())
+        for name in present:
+            deps_hasher.update(b"\n--\n")
+            deps_hasher.update(name.encode())
+            deps_hasher.update(b"\n")
+            deps_hasher.update((worktree / name).read_bytes())
+        deps_key = f"copy-deps:{deps_hasher.hexdigest()[:16]}"
+
+        async with self._lock_for(deps_key):
+            with tempfile.TemporaryDirectory(prefix="ai-os-copybuild-") as tmp_dir:
+                dockerfile_path = Path(tmp_dir) / "Dockerfile"
+                dockerfile_path.write_text(dockerfile, encoding="utf-8")
+                proc = await asyncio.create_subprocess_exec(
+                    self.docker_cli, "build", "-t", tag, "-f", str(dockerfile_path), str(worktree),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
                 )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                feedback = build_feedback(
-                    success=False, exit_code=124,
-                    raw_output=f"Dependency install/build timed out after {self.build_timeout_seconds}s.",
-                )
-                return profile.image, ValidationResult(
-                    False, 124, "Dependency install/build timed out.", feedback["output"]
-                )
-            if proc.returncode != 0:
-                feedback = build_feedback(
-                    success=False, exit_code=proc.returncode or 1,
-                    raw_output="Dependency install failed while building the sandbox image:\n"
-                    + out.decode(errors="replace"),
-                )
-                return profile.image, ValidationResult(
-                    False, proc.returncode or 1, "Dependency install failed.", feedback["output"]
-                )
+                try:
+                    out, _ = await asyncio.wait_for(
+                        proc.communicate(), timeout=self.build_timeout_seconds
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    feedback = build_feedback(
+                        success=False, exit_code=124,
+                        raw_output=f"Dependency install/build timed out after {self.build_timeout_seconds}s.",
+                    )
+                    return profile.image, ValidationResult(
+                        False, 124, "Dependency install/build timed out.", feedback["output"]
+                    )
+                if proc.returncode != 0:
+                    feedback = build_feedback(
+                        success=False, exit_code=proc.returncode or 1,
+                        raw_output="Dependency install failed while building the sandbox image:\n"
+                        + out.decode(errors="replace"),
+                    )
+                    return profile.image, ValidationResult(
+                        False, proc.returncode or 1, "Dependency install failed.", feedback["output"]
+                    )
         return tag, None
 
     async def _best_effort_rmi(self, tag: str) -> None:

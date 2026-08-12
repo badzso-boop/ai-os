@@ -13,6 +13,7 @@ A real end-to-end Java container run also exists, but is opt-in: set
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 from pathlib import Path
@@ -132,3 +133,83 @@ async def test_java_sandbox_runs_mvn(tmp_path):
     # the pipeline ran and produced a result, not a specific test outcome.
     assert result.exit_code is not None
     assert "mvn" in result.output.lower() or result.success or not result.success
+
+
+# -- concurrent-build locking (no Docker needed) -----------------------------
+
+
+def test_lock_for_returns_same_lock_instance_for_same_key():
+    runner = EphemeralSandboxRunner()
+    lock_a = runner._lock_for("same-key")
+    lock_b = runner._lock_for("same-key")
+    assert lock_a is lock_b
+
+
+def test_lock_for_returns_different_locks_for_different_keys():
+    runner = EphemeralSandboxRunner()
+    lock_a = runner._lock_for("key-a")
+    lock_b = runner._lock_for("key-b")
+    assert lock_a is not lock_b
+
+
+async def test_concurrent_identical_dependency_builds_serialize_not_race():
+    """Two tasks in the same epic batch with identical manifests (neither
+    touched package.json/requirements.txt/pom.xml) call
+    `_ensure_dependency_image` concurrently. Without the lock, both would see
+    "image doesn't exist yet" and race `docker build -t <same tag>`
+    concurrently - reproduced here with a fake `_image_exists`/build that
+    tracks concurrent entries instead of shelling out to real Docker."""
+    runner = EphemeralSandboxRunner()
+    concurrent_builds = 0
+    max_concurrent = 0
+    built_count = 0
+
+    async def fake_image_exists(tag: str) -> bool:
+        return built_count > 0
+
+    async def fake_build(*args, **kwargs):
+        nonlocal concurrent_builds, max_concurrent, built_count
+        concurrent_builds += 1
+        max_concurrent = max(max_concurrent, concurrent_builds)
+        await asyncio.sleep(0.05)  # widen the race window
+        built_count += 1
+        concurrent_builds -= 1
+
+        class _FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"", None
+
+        return _FakeProc()
+
+    runner._image_exists = fake_image_exists  # type: ignore[method-assign]
+
+    import ai_os.sandbox.container_runner as cr_module
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return await fake_build()
+
+    original = cr_module.asyncio.create_subprocess_exec
+    cr_module.asyncio.create_subprocess_exec = fake_create_subprocess_exec
+    try:
+        profile = SandboxProfile(
+            image="fake:1", command="true", dependency_manifests=("requirements.txt",),
+            install_command="pip install -r requirements.txt",
+        )
+        worktree = Path(__file__).parent  # any real dir; content is hashed
+        manifest = worktree / "requirements.txt"
+        manifest.write_text("six\n")
+        try:
+            results = await asyncio.gather(
+                runner._ensure_dependency_image(profile, worktree, ["requirements.txt"]),
+                runner._ensure_dependency_image(profile, worktree, ["requirements.txt"]),
+            )
+        finally:
+            manifest.unlink()
+    finally:
+        cr_module.asyncio.create_subprocess_exec = original
+
+    assert max_concurrent == 1  # never raced - the lock serialized them
+    assert built_count == 1  # the second call reused the now-cached image
+    assert results[0][0] == results[1][0]  # same tag
