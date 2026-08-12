@@ -21,11 +21,12 @@ def test_flags_github_workflows():
 def test_flags_env_dockerfile_secrets():
     flagged = set(sensitive_paths([
         ".env", ".env.production", "Dockerfile", "backend/Dockerfile",
-        "config/secrets.yml", "src/main.py",
+        "config/secrets.yml", "secrets.txt", "secrets.env", "src/main.py",
     ]))
     assert ".env" in flagged and ".env.production" in flagged
     assert "Dockerfile" in flagged and "backend/Dockerfile" in flagged
     assert "config/secrets.yml" in flagged
+    assert "secrets.txt" in flagged and "secrets.env" in flagged
     assert "src/main.py" not in flagged
 
 
