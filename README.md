@@ -72,9 +72,9 @@ AI-OS is organized into four main layers plus an observability surface:
 5. 🛡️ [Execution & Validation Sandbox](docs/05_EXECUTION_VALIDATION_SANDBOX.md) — Git worktrees, ephemeral Docker/Podman containers, and the HITL preemption engine.
 6. 📊 [Glass Box UI & Observability](docs/06_GLASS_BOX_UI.md) — real-time CLI/web dashboard for supervising the system.
 7. 🧙‍♂️ [CLI Wizard & Interactive Onboarding](docs/22_CLI_WIZARD_AND_PROJECT_ONBOARDING.md) — post-install setup wizard and AI-driven project onboarding specification.
-8. 🔧 [Wizard CLI Re-Integration Details](docs/WIZARD_CLI_INTEGRATION.md) — magyar nyelvű összefoglaló a wizard, interaktív project onboarding és event printer tiszta integrációjáról, hibatörténetéről és teszteléséről.
+8. 🔧 [Wizard CLI Re-Integration Details](docs/WIZARD_CLI_INTEGRATION.md) — summary of the wizard, interactive project onboarding, and event printer integration, history, and testing.
 
-> The `docs/` specs are written in Hungarian and remain the authoritative design source for anything not yet implemented. `CLAUDE.md` documents exactly what is built today, per phase.
+> The `docs/` specifications serve as the authoritative design source for architecture and features. `CLAUDE.md` documents exactly what is built today, per phase.
 
 ---
 
