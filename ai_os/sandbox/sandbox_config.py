@@ -161,6 +161,22 @@ def parse_sandbox_config(data: object) -> SandboxConfig:
     )
 
 
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    result = dict(base)
+    for key, value in override.items():
+        if key in result:
+            base_val = result[key]
+            if isinstance(base_val, dict) and isinstance(value, dict):
+                result[key] = _deep_merge_dicts(base_val, value)
+            elif isinstance(base_val, list) and isinstance(value, list):
+                result[key] = base_val + value
+            else:
+                result[key] = value
+        else:
+            result[key] = value
+    return result
+
+
 def load_sandbox_config(worktree_path: Path, language: str | None = None) -> SandboxConfig | None:
     """Load `<worktree>/.ai-os/sandbox.json` if present, else `None`. Raises
     `SandboxConfigError` if the file exists but is malformed.
@@ -198,8 +214,10 @@ def load_sandbox_config(worktree_path: Path, language: str | None = None) -> San
             sub = per_language[language]
             if not isinstance(sub, dict):
                 raise SandboxConfigError(f"languages.{language} must be an object")
-            return parse_sandbox_config({**shared, **sub})
+            merged = _deep_merge_dicts(shared, sub)
+            return parse_sandbox_config(merged)
         # A task in a language the map doesn't cover falls back to shared defaults
         # (or None when there are none) — so it isn't accidentally DB-validated.
         return parse_sandbox_config(shared) if shared else None
     return parse_sandbox_config(data)
+

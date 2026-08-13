@@ -81,6 +81,31 @@ def test_invalid_json_file_raises(tmp_path):
         load_sandbox_config(tmp_path)
 
 
+def test_per_language_deep_merge(tmp_path):
+    (tmp_path / ".ai-os").mkdir()
+    (tmp_path / ".ai-os" / "sandbox.json").write_text(json.dumps({
+        "env": {"COMMON_ENV": "1", "OVERRIDDEN_ENV": "base"},
+        "setup_commands": ["echo base_setup"],
+        "languages": {
+            "python": {
+                "env": {"PYTHON_ENV": "2", "OVERRIDDEN_ENV": "py_override"},
+                "setup_commands": ["echo py_setup"],
+                "test_command": "pytest",
+            }
+        }
+    }))
+    config = load_sandbox_config(tmp_path, language="python")
+    assert config is not None
+    assert config.env == {
+        "COMMON_ENV": "1",
+        "OVERRIDDEN_ENV": "py_override",
+        "PYTHON_ENV": "2",
+    }
+    assert config.setup_commands == ("echo base_setup", "echo py_setup")
+    assert config.test_command == "pytest"
+
+
+
 # -- DB-aware argv (internal network + injected env) -------------------------
 
 
