@@ -1,7 +1,6 @@
 # 22. CLI Wizard & Interactive Project Onboarding — `ai-os wizard` & AI-driven `ai-os project add`
 
-> **Státusz: tervdokumentum (design doc).** Ez a parancs és bővítés MÉG NINCS implementálva.
-> A dokumentum az `ai-os wizard` post-install varázsló és a továbbfejlesztött, AI-alapú `ai-os project add` automatikus projekt-konfiguráló működését írja le. Kód angol, próza magyar.
+> **Státusz: Implementálva (Active).** Ez a dokumentum az `ai-os wizard` post-install varázsló és a továbbfejlesztött, AI-alapú `ai-os project add` automatikus projekt-konfiguráló működését és specifikációját írja le. Kód angol, próza magyar.
 
 ---
 
