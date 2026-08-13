@@ -1,12 +1,12 @@
 # 08. Knowledge Graph Schema & Subgraph Extraction Algorithms
 
-Ez a dokumentum az **AI-OS Knowledge & Context Engine** mélyszintű specifikációja. Kidolgozza a Tudásgráf (Knowledge Graph) gráfadatbázis sémáját, a $k$-hop szomszédsági kinyerő algoritmust, a tömörített kódvázak (Skeleton Stubs) automatikus generálását, valamint a Python nyelven megírt teljes referencia-implementációt.
+This document is the **AI-OS Knowledge & Context Engine** melyszintu specification. Kidolgozza a Tudasgraf (Knowledge Graph) grafadatbazis semajat, a $k$-hop szomszedsagi kinyero algoritmust, a tomoritett kodvazak (Skeleton Stubs) automatikus generalasat, valamint a Python nyelven megirt teljes referencia-implementaciot.
 
 ---
 
-## 1. Tudásgráf Séma (Node & Edge Schema)
+## 1. Tudasgraf Sema (Node & Edge Schema)
 
-A Tudásgráf (`NetworkX` in-memory vagy `Neo4j` perzisztens adatbázisban) a forráskód entitásait és azok relációit tárolja determinisztikus Tree-sitter elemzés alapján.
+A Tudasgraf (`NetworkX` in-memory vagy `Neo4j` perzisztens adatbazisban) a forraskod entitasait es azok relacioit tarolja determinisztikus Tree-sitter elemzes based on.
 
 ```mermaid
 classDiagram
@@ -44,30 +44,30 @@ classDiagram
     FunctionNode "1" -- "*" TypeNode : USES_TYPE
 ```
 
-### 1.1. Csomópontok (Nodes) Specifikációja
+### 1.1. Csomopontok (Nodes) Specifikacioja
 
-| Node Type | FQN (Fully Qualified Name) Példa | Kulcs Név-érték Pár Attribútumok |
+| Node Type | FQN (Fully Qualified Name) Pelda | Kulcs Nev-ertek Par Attributumok |
 | :--- | :--- | :--- |
 | `FileNode` | `src/services/UserService.ts` | `filepath`, `language`, `hash`, `write_locked_by` |
 | `ClassNode` | `src/services/UserService.ts::UserService` | `name`, `is_abstract`, `start_line`, `end_line` |
 | `FunctionNode` | `src/services/UserService.ts::UserService.createUser` | `name`, `return_type`, `params`, `docstring` |
 | `TypeNode` | `src/types/user.ts::UserDTO` | `name`, `kind` (`interface` / `enum` / `type`), `stub` |
 
-### 1.2. Élek (Edges) Specifikációja
+### 1.2. Elek (Edges) Specifikacioja
 
-| Él Típusa (Edge) | Forrás (Source) ➔ Cél (Target) | Leírás / Attribútumok |
+| Edge Type | Source ➔ Target | Description / Attributes |
 | :--- | :--- | :--- |
-| `CONTAINS` | `FileNode ➔ ClassNode / FunctionNode` | Fájlstruktúra tagság |
-| `IMPORTS` | `FileNode A ➔ FileNode B` | Statikus import függőség (`imported_symbols`) |
-| `CALLS` | `FunctionNode A ➔ FunctionNode B` | Hívási gráf él (`call_line`, `is_async`) |
-| `EXTENDS` | `ClassNode A ➔ ClassNode B` | Osztályöröklődés |
-| `USES_TYPE` | `FunctionNode A ➔ TypeNode T` | Típusfüggőség a szignatúrában |
+| `CONTAINS` | `FileNode ➔ ClassNode / FunctionNode` | Fajlstruktura tagsag |
+| `IMPORTS` | `FileNode A ➔ FileNode B` | Statikus import fuggoseg (`imported_symbols`) |
+| `CALLS` | `FunctionNode A ➔ FunctionNode B` | Hivasi graf el (`call_line`, `is_async`) |
+| `EXTENDS` | `ClassNode A ➔ ClassNode B` | Osztalyoroklodes |
+| `USES_TYPE` | `FunctionNode A ➔ TypeNode T` | Tipusfuggoseg a szignaturaban |
 
 ---
 
 ## 2. $k$-Hop Subgraph Extraction Algoritmus
 
-Amikor egy AI ágens feladatot kap (pl. `target_files = ["src/services/UserService.ts"]`), a rendszer **nem küldi el a teljes kódbázist**. Ehelyett kiszámítja a célcsomópontok $k$-hop sugarú szomszédsági gráfját.
+Amikor egy AI agens feladatot kap (pl. `target_files = ["src/services/UserService.ts"]`), a rendszer **nem kuldi el a teljes kodbazist**. Ehelyett kiszamitja a celcsomopontok $k$-hop sugaru szomszedsagi grafjat.
 
 ```mermaid
 graph TD
@@ -89,23 +89,23 @@ graph TD
     classDef pruned fill:#eee,stroke:#ccc,color:#aaa;
 ```
 
-### Algoritmus Lépései:
+### Algoritmus Stepei:
 
-1. **Magcsomópontok (Seed Nodes) beállítása**:
-   - A feladat `write_set` és `read_set` fájljaihoz tartozó `FileNode`, `ClassNode` és `FunctionNode` elemek.
-2. **Irányított Gráf-Bejárás ($k$-hop traversal)**:
-   - $k=1$ sugarú bejárás a kimenő `IMPORTS`, `USES_TYPE`, `EXTENDS` éleken.
-   - $k=1$ sugarú bejárás a bemenő `CALLS` éleken (kik hívják ezt a függvényt).
-3. **Kód-váz kinyerése (Skeleton Extraction)**:
-   - A $k$-hop grfban szereplő csomópontokból a rendszer kiszűri a függvénytörzseket (beépített implementáció), és csak a vázat (interfész szignatúra) tartja meg.
+1. **Magcsomopontok (Seed Nodes) beallitasa**:
+   - A feladat `write_set` es `read_set` fajljaihoz tartozo `FileNode`, `ClassNode` es `FunctionNode` elemek.
+2. **Iranyitott Graf-Bejaras ($k$-hop traversal)**:
+   - $k=1$ sugaru bejaras a kimeno `IMPORTS`, `USES_TYPE`, `EXTENDS` eleken.
+   - $k=1$ sugaru bejaras a bemeno `CALLS` eleken (kik hivjak ezt a fuggvenyt).
+3. **Kod-vaz kinyerese (Skeleton Extraction)**:
+   - A $k$-hop grfban szereplo csomopontokbol a rendszer kiszuri a fuggvenytorzseket (beepitett implementacio), es csak a vazat (interfesz szignatura) tartja meg.
 
 ---
 
-## 3. Skeleton Extractor (AST Kódtömörítés)
+## 3. Skeleton Extractor (AST Kodtomorites)
 
-A **Skeleton Extractor** a kinyert subgrapban lévő fájlokból eldobja az algoritmusok belső kódját, 80-90%-os token-megtakarítást érve el:
+A **Skeleton Extractor** a kinyert subgrapban levo fajlokbol eldobja az algoritmusok belso kodjat, 80-90%-os token-megtakaritast erve el:
 
-### Eredeti Kód (100% Token):
+### Eredeti Kod (100% Token):
 ```typescript
 export class UserRepository {
   private db: DatabaseConnection;
@@ -125,7 +125,7 @@ export class UserRepository {
 }
 ```
 
-### Generált Skeleton Stub (15% Token):
+### Generalt Skeleton Stub (15% Token):
 ```typescript
 // SKELETON STUB FOR DEPENDENCY: src/repositories/UserRepository.ts
 // DO NOT MODIFY THIS FILE. FOR INTERFACE REFERENCE ONLY.
@@ -138,9 +138,9 @@ export class UserRepository {
 
 ---
 
-## 4. Python Implementációs Blueprint (NetworkX + Skeleton Generator)
+## 4. Python Implementacios Blueprint (NetworkX + Skeleton Generator)
 
-Az alábbi Python modul tartalmazza a teljes tudásgráf építést, a $k$-hop subgraph kinyerést és a kontextus csomagolót:
+Az alabbi Python modul tartalmazza a teljes tudasgraf epitest, a $k$-hop subgraph kinyerest es a kontextus csomagolot:
 
 ```python
 import networkx as nx
@@ -148,7 +148,7 @@ from typing import List, Set, Dict, Any
 
 class KnowledgeEngine:
     def __init__(self):
-        # Irányított multi-gráf a kódbázis entitásainak
+        # Iranyitott multi-graf a kodbazis entitasainak
         self.graph = nx.DiGraph()
 
     def add_file_node(self, filepath: str, language: str):
@@ -163,7 +163,7 @@ class KnowledgeEngine:
 
     def extract_context_subgraph(self, target_files: List[str], max_hops: int = 2) -> str:
         """
-        Kiszámítja a k-hop szomszédsági gráfot és előállítja a tömörített Context Cache-t.
+        Kiszamitja a k-hop szomszedsagi grafot es generates a tomoritett Context Cache-t.
         """
         extracted_nodes: Set[str] = set()
 
@@ -171,11 +171,11 @@ class KnowledgeEngine:
             if target_file not in self.graph:
                 continue
             
-            # Ego graph kinyerése k-hop távolságra
+            # Ego graph kinyerese k-hop tavolsagra
             subgraph = nx.ego_graph(self.graph, target_file, radius=max_hops, undirected=False)
             extracted_nodes.update(subgraph.nodes())
 
-        # Tömörített kontextus szöveg előállítása
+        # Tomoritett kontextus szoveg generation
         context_blocks: List[str] = []
         visited_files: Set[str] = set()
 
@@ -193,10 +193,10 @@ class KnowledgeEngine:
 
     def invalidate_file(self, filepath: str):
         """
-        Eseményvezérelt érvénytelenítés: törli a fájlhoz tartozó szimbólumokat és éleket.
+        Esemenyvezerelt ervenytelenites: torli a fajlhoz tartozo szimbolumokat es eleket.
         """
         if filepath in self.graph:
-            # Eltávolítjuk a fájl által tartalmazott szimbólumokat
+            # Eltavolitjuk a fajl altal tartalmazott szimbolumokat
             contained_nodes = [
                 target for _, target, data in self.graph.out_edges(filepath, data=True)
                 if data.get("relation") == "CONTAINS"

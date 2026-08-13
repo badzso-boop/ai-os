@@ -1,28 +1,28 @@
 # 05. Execution & Validation Sandbox
 
-Az **Execution & Validation Sandbox** gondoskodik a kód generálásának biztonságos izolációjáról, a gyors fájlrendszer műveletekről, valamint a szigorú konténeres validációról.
+The **Execution & Validation Sandbox** handles the safe isolation of code generation, fast filesystem operations, and strict containerized validation.
 
 ---
 
 ## 1. Host Environment: Git Worktrees Isolations
 
-A fájlrendszer-műveletek gyorsasága érdekében az AI ágensek a gazdagépen (Host OS) dolgoznak, azonban szigorúan **elkülönített Git Worktree ágakon**.
+For filesystem operation speed, AI agents work directly on the host (Host OS), but strictly within **isolated Git Worktree branches**.
 
 ```bash
-# Worktree létrehozása egy specifikus feladathoz
+# Create a worktree for a specific task
 git worktree add -b feature/TASK-102 .ai-os/worktrees/TASK-102 main
 ```
 
-### Előnyök:
-- Nem igényel a teljes kódbázis lemásolását (virtuális linkek és közös `.git` objektum-adatbázis).
-- Az ágensek függetlenül tudnak fájlokat módosítani és git commit-okat létrehozni.
-- Bármely elhibázott vagy hibás feladat esetén a worktree nyomtalanul törölhető (`git worktree remove --force`).
+### Benefits:
+- Does not require copying the entire codebase (virtual links and shared `.git` object database).
+- Agents can modify files and create git commits independently.
+- In case of any failed or buggy task, the worktree can be removed without trace (`git worktree remove --force`).
 
 ---
 
 ## 2. Validation Pipeline: Ephemeral Docker Containers
 
-Az AI által generált kód **soha nem futhat közvetlenül a gazdagépen**, megelőzve az esetleges kártékony scripteket vagy a gazdagép környezetének beszennyezését.
+AI-generated code must **never execute directly on the host**, preventing potential malicious scripts or host environment contamination.
 
 ```mermaid
 graph LR
@@ -37,16 +37,16 @@ graph LR
     Container -->|Exit Code & Logs| ValidationEngine[Validation Engine]
 ```
 
-### 2.1. Eldobható Konténer Konfiguráció
-- **Alapértelmezett Image-ek**: `node:20-alpine`, `python:3.12-slim`, `maven:3.9-eclipse-temurin`
-- **Hálózati Izoláció**: `network_mode: "none"` (Az ágens által generált kód nem kezdeményezhet kimenő hálózati kéréseket a validáció során, kivéve ha az tesztkövetelmény).
-- **Erőforrás Korlátok**: Memória limit (pl. 2GB), CPU limit (pl. 2 core), Timeout (pl. 60 sec).
+### 2.1. Ephemeral Container Configuration
+- **Default Images**: `node:20-alpine`, `python:3.12-slim`, `maven:3.9-eclipse-temurin`
+- **Network Isolation**: `network_mode: "none"` (Agent-generated code cannot initiate outbound network requests during validation unless explicitly required by tests).
+- **Resource Limits**: Memory limit (e.g. 2GB), CPU limit (e.g. 2 cores), Timeout (e.g. 60 sec).
 
 ---
 
 ## 3. Prompt Feedback Loop & HITL (Preemption Engine)
 
-Ha a konténeres validáció hibával zárul (nem 0 exit code), lép életbe a **Prompt Feedback Loop** és a **Preemption Engine**.
+If containerized validation ends with an error (non-zero exit code), the **Prompt Feedback Loop** and **Preemption Engine** take effect.
 
 ```mermaid
 stateDiagram-v2
@@ -67,8 +67,8 @@ stateDiagram-v2
     Success --> [*]
 ```
 
-### 3.1. Prompt Feedback Loop (Automata Hibajavítás)
-Ha a tesztek elbuknak, az Orchestrator összefoglalja a hiba kimenetet (Compiler / Linter / Pytest trace) és visszaküldi az ágensnek:
+### 3.1. Prompt Feedback Loop (Automated Bug Fixing)
+If tests fail, the Orchestrator summarizes the failure output (Compiler / Linter / Pytest trace) and sends it back to the agent:
 
 ```markdown
 [VALIDATION FAILURE - TASK-102]
@@ -82,7 +82,8 @@ Please fix the error above and provide the updated code snippet.
 ```
 
 ### 3.2. Preemption Engine (Human-in-the-Loop)
-- Ha a feladat `retry_count` értéke eléri a küszöbértéket (pl. 3 sikertelen kísérlet):
-1. A rendszer felfüggeszti (`BLOCKED`) az adott DAG ágat.
-2. Értesítést küld a **Glass Box UI** felületre és a fejlesztőnek.
-3. A fejlesztő átveheti a feladatot, módosíthatja a kódot vagy a promptot, és manuálisan visszaküldheti a feladatot a DAG hurkába.
+- If a task's `retry_count` reaches the threshold (e.g., 3 failed attempts):
+1. The system suspends (`BLOCKED`) the affected DAG branch.
+2. Sends a notification to the **Glass Box UI** interface and developer.
+3. The developer can take over the task, modify code or prompt, and manually submit the task back into the DAG execution loop.
+

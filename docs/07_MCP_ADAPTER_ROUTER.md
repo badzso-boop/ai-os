@@ -1,19 +1,19 @@
 # 07. MCP Server & Orchestrator Engine Architecture
 
-Ez a dokumentum az **AI-OS Orchestrator Kernel** és az **MCP (Model Context Protocol) Adapter & Server Engine** megvalósítási szintű specifikációja. Tartalmazza a determinisztikus rendszermag működését, az UML / Mermaid architektúra-diagramokat, a pontos JSON-RPC MCP parancssémákat és a fejlesztéshez szükséges Python kód-blueprintet.
+This document is the **AI-OS Orchestrator Kernel** es az **MCP (Model Context Protocol) Adapter & Server Engine** megvalositasi szintu specification. Tartalmazza a determinisztikus rendszermag operation, az UML / Mermaid architektura-diagramokat, a pontos JSON-RPC MCP parancssemakat es a developmenthez szukseges Python kod-blueprintet.
 
 ---
 
-## 1. Architektúra Koncepció: Kernel vs. AI Végrehajtó Magok
+## 1. Architektura Koncepcio: Kernel vs. AI Vegrehajto Magok
 
-Az AI-OS működése a számítógépes operációs rendszerek (OS Kernel) mintájára épül:
+Az AI-OS operation a szamitogepes operacios rendszerek (OS Kernel) mintajara epul:
 
-- **Orchestrator Core (Ring 0 - OS Kernel)**: **100%-ig determinisztikus Python 3.12+ algoritmus** (`asyncio`). Felelős az állapotgépekért, a függőségi gráfokért (DAG), a fájlzárolásokért, az MCP szerver/kliens protokoll kommunikációért és a Git Worktree / Docker sandbox felügyeletéért. **0 token költségű**, nem téveszt, nem hallucinál.
-- **AI Executing Cores (Ring 3 - User Space Processes)**: A felcserélhető LLM-ek (Claude, OpenAI, Gemini, DeepSeek). Kizárólag az Orchestrator által átadott korlátozott kontextussal és MCP eszközökkel dolgoznak.
+- **Orchestrator Core (Ring 0 - OS Kernel)**: **100%-ig determinisztikus Python 3.12+ algoritmus** (`asyncio`). Felelos az allapotgepekert, a fuggosegi grafokert (DAG), a fajlzarolasokert, az MCP szerver/kliens protokoll kommunikacioert es a Git Worktree / Docker sandbox felugyeleteert. **0 token koltsegu**, nem teveszt, nem hallucinal.
+- **AI Executing Cores (Ring 3 - User Space Processes)**: A felcserelheto LLM-ek (Claude, OpenAI, Gemini, DeepSeek). Kizarolag az Orchestrator altal atadott korlatozott kontextussal es MCP eszkozokkel dolgoznak.
 
 ```mermaid
 graph TD
-    User([Fejlesztő / Admin]) -->|1. High-level Task / Epic| OrchestratorKernel
+    User([Developer / Admin]) -->|1. High-level Task / Epic| OrchestratorKernel
 
     subgraph OrchestratorKernel [AI-OS Orchestrator Kernel (Deterministic Python Engine)]
         DAGPlanner[1. DAG Planner & Cycle Checker]
@@ -41,9 +41,9 @@ graph TD
 
 ---
 
-## 2. UML / Mermaid Szekvencia Diagram: Kódmódosítás Életciklusa
+## 2. UML / Mermaid Szekvencia Diagram: Kodmodositas Eletciklusa
 
-Az alábbi diagram szemlélteti, hogy egy ágens hogyan hoz létre vagy módosít egy fájlt a rendszerben anélkül, hogy közvetlen operációs rendszer hozzáférése lenne:
+Az alabbi diagram szemlelteti, hogy egy agens hogyan hoz letre vagy modosit egy fajlt a rendszerben anelkul, hogy kozvetlen operacios rendszer hozzaferese lenne:
 
 ```mermaid
 sequenceDiagram
@@ -58,16 +58,16 @@ sequenceDiagram
     Lock-->>Kernel: Lock Granted
     Kernel->>LLM: MCP Task Execution Request (Context + Tools)
     
-    note over LLM: Ágens feldolgozza a Context Cache-t
+    note over LLM: Agens feldolgozza a Context Cache-t
     LLM->>Kernel: MCP Tool Call: propose_file_patch(filepath, content, is_new_file)
     
-    note over Kernel: Zárolás és biztonsági ellenőrzés
-    Kernel->>WT: Fájl írása / javítása a kijelölt Worktree-ben
+    note over Kernel: Zarolas es biztonsagi ellenorzes
+    Kernel->>WT: Fajl irasa / javitasa a kijelolt Worktree-ben
     WT-->>Kernel: File Written OK
     Kernel-->>LLM: MCP Tool Response: {status: "PATCH_APPLIED_TO_WORKTREE"}
     
     LLM->>Kernel: MCP Tool Call: trigger_sandbox_validation()
-    Kernel->>Docker: Konténer indítása + Mount Worktree Read-Only
+    Kernel->>Docker: Kontener inditasa + Mount Worktree Read-Only
     Docker->>Docker: npm test / pytest / tsc compilation
     Docker-->>Kernel: Exit Code: 0 (Success)
     Kernel-->>LLM: MCP Tool Response: {success: true, output: "Tests Passed"}
@@ -78,14 +78,14 @@ sequenceDiagram
 
 ---
 
-## 3. MCP Eszközök (Tools) Pontos JSON-RPC Sémája
+## 3. MCP Eszkozok (Tools) Pontos JSON-RPC Semaja
 
-Minden ágens kizárólag az alábbi 3 szabványos MCP eszközt hívhatja meg JSON-RPC üzenetekkel.
+Minden agens kizarolag az alabbi 3 szabvanyos MCP eszkozt hivhatja meg JSON-RPC uzenetekkel.
 
-### 3.1. `propose_file_patch` (Kód létrehozása vagy módosítása)
-Ezzel az eszközzel az ágens új fájlt hoz létre vagy egy meglévőt módosít a saját Git Worktree-jében.
+### 3.1. `propose_file_patch` (Kod letrehozasa vagy modositasa)
+Ezzel az eszkozzel az agens uj fajlt hoz letre vagy egy meglevot modosit a sajat Git Worktree-jeben.
 
-#### JSON-RPC Kérés (LLM -> Orchestrator):
+#### JSON-RPC Keres (LLM -> Orchestrator):
 ```json
 {
   "jsonrpc": "2.0",
@@ -102,7 +102,7 @@ Ezzel az eszközzel az ágens új fájlt hoz létre vagy egy meglévőt módosí
 }
 ```
 
-#### JSON-RPC Válasz (Orchestrator -> LLM):
+#### JSON-RPC Valasz (Orchestrator -> LLM):
 ```json
 {
   "jsonrpc": "2.0",
@@ -121,10 +121,10 @@ Ezzel az eszközzel az ágens új fájlt hoz létre vagy egy meglévőt módosí
 
 ---
 
-### 3.2. `fetch_symbol_definition` (Szimbólum részletek kérése)
-A kontextusablak kímélése érdekében az ágens ezzel kéri le egy olyan osztály/függvény teljes törzsét, amely nem volt benne az alap Context Cache-ben.
+### 3.2. `fetch_symbol_definition` (Szimbolum reszletek kerese)
+A kontextusablak kimelese erdekeben az agens ezzel keri le egy olyan osztaly/fuggveny teljes torzset, amely nem volt benne az alap Context Cache-ben.
 
-#### JSON-RPC Kérés:
+#### JSON-RPC Keres:
 ```json
 {
   "jsonrpc": "2.0",
@@ -141,10 +141,10 @@ A kontextusablak kímélése érdekében az ágens ezzel kéri le egy olyan oszt
 
 ---
 
-### 3.3. `trigger_sandbox_validation` (Konténeres validáció indítása)
-Elindítja az eldobható Docker konténeres tesztet és visszacsatolja az eredménylogot.
+### 3.3. `trigger_sandbox_validation` (Konteneres validacio inditasa)
+Elinditja az eldobhato Docker konteneres tesztet es visszacsatolja az eredmenylogot.
 
-#### JSON-RPC Kérés:
+#### JSON-RPC Keres:
 ```json
 {
   "jsonrpc": "2.0",
@@ -157,7 +157,7 @@ Elindítja az eldobható Docker konténeres tesztet és visszacsatolja az eredm�
 }
 ```
 
-#### JSON-RPC Válasz (Validation Passed):
+#### JSON-RPC Valasz (Validation Passed):
 ```json
 {
   "jsonrpc": "2.0",
@@ -176,9 +176,9 @@ Elindítja az eldobható Docker konténeres tesztet és visszacsatolja az eredm�
 
 ---
 
-## 4. Python Implementációs Blueprint (Orchestrator MCP Core)
+## 4. Python Implementacios Blueprint (Orchestrator MCP Core)
 
-Az alábbi kód bemutatja az Orchestrator MCP szerver és Git Worktree kezelőjének működőképes vázát:
+Az alabbi kod bemutatja az Orchestrator MCP szerver es Git Worktree kezelojenek mukodokepes vazat:
 
 ```python
 import asyncio
@@ -194,7 +194,7 @@ class OrchestratorMCPBridge:
         self.worktree_path = self.project_root / ".ai-os" / "worktrees" / task_id
 
     def setup_worktree(self, base_branch: str = "main"):
-        """Létrehoz egy izolált Git Worktree-t a feladatnak determinisztikusan."""
+        """Letrehoz egy izolalt Git Worktree-t a feladatnak determinisztikusan."""
         self.worktree_path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             "git", "worktree", "add", "-b", f"feature/{self.task_id}",
@@ -203,14 +203,14 @@ class OrchestratorMCPBridge:
         subprocess.run(cmd, cwd=self.project_root, check=True, capture_output=True)
 
     async def handle_propose_file_patch(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Kód írása / javítása a szeparált worktree-ben (NEM a fő kódbázisban!)."""
+        """Kod irasa / javitasa a szeparalt worktree-ben (NEM a fo kodbazisban!)."""
         rel_filepath = args.get("filepath")
         content = args.get("content")
         
         target_file = self.worktree_path / rel_filepath
         target_file.parent.mkdir(parents=True, exist_ok=True)
         
-        # Fájl írása a Worktree-be
+        # Fajl irasa a Worktree-be
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(content)
             
@@ -220,12 +220,12 @@ class OrchestratorMCPBridge:
         }
 
     async def handle_trigger_sandbox_validation(self) -> Dict[str, Any]:
-        """Docker container indítása a módosított worktree validálására."""
+        """Docker container inditasa a modositott worktree validalasara."""
         # Docker run command read-only mount-tal
         cmd = [
             "docker", "run", "--rm",
             "-v", f"{self.worktree_path}:/app:ro",
-            "--net", "none",  # Izolált hálózat
+            "--net", "none",  # Izolalt halozat
             "node:20-alpine", "npm", "test"
         ]
         
@@ -241,7 +241,7 @@ class OrchestratorMCPBridge:
         }
 
     def cleanup_worktree(self):
-        """Törli a worktree-t a sikeres merge után."""
+        """Torli a worktree-t a sikeres merge utan."""
         cmd = ["git", "worktree", "remove", "--force", str(self.worktree_path)]
         subprocess.run(cmd, cwd=self.project_root, capture_output=True)
 ```
