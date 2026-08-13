@@ -46,6 +46,9 @@ SENSITIVE_PATTERNS = (
 def _matches(path: str, pattern: str) -> bool:
     # fnmatch's `*` also spans `/`, which is what we want for the `**` and dir
     # patterns here; a plain `*/Dockerfile` still matches `a/b/Dockerfile`.
+    if pattern.startswith("**/"):
+        if fnmatch(path, pattern[3:]):
+            return True
     return fnmatch(path, pattern)
 
 
