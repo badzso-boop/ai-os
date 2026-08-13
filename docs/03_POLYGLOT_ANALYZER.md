@@ -1,14 +1,14 @@
-# 03. Polyglot Analyzer Engine (Determinisztikus Elemző Réteg)
+# 03. Polyglot Analyzer Engine (Determinisztikus Elemzo Reteg)
 
-A **Polyglot Analyzer Engine** felelős a teljes kódbázis folyamatos, determinisztikus elemzéséért. A modul **0 AI token elhasználásával** állítja elő az Absztrakt Szintaxisfát (AST), a szimbólumtáblákat, az import/export függőségeket és a hívási gráfokat (Call Graphs).
+A **Polyglot Analyzer Engine** is responsible for teljes kodbazis folyamatos, determinisztikus elemzeseert. A modul **0 AI token elhasznalasaval** allitja elo az Absztrakt Szintaxisfat (AST), a szimbolumtablakat, az import/export fuggosegeket and the hivasi grafokat (Call Graphs).
 
 ---
 
-## 1. Támogatott Nyelvek és Parser Technológia
+## 1. Tamogatott Nyelvek es Parser Technologia
 
-A determinisztikus parser réteg a **Tree-sitter** (Python kötések: `py-tree-sitter`) könyvtárra épül, amely inkrementális és szupergyors kódértelmezést biztosít.
+A determinisztikus parser reteg a **Tree-sitter** (Python kotesek: `py-tree-sitter`) konyvtarra epul, amely inkrementalis es szupergyors kodertelmezest biztosit.
 
-### 1.1. Elsődlegesen Támogatott Nyelvek
+### 1.1. Elsodlegesen Tamogatott Nyelvek
 - **JavaScript / TypeScript** (`tree-sitter-typescript`)
 - **HTML / Template-ek** (`tree-sitter-html`)
 - **CSS / SASS** (`tree-sitter-css`)
@@ -18,10 +18,10 @@ A determinisztikus parser réteg a **Tree-sitter** (Python kötések: `py-tree-s
 
 ---
 
-## 2. Szimbólum & Gráf Kinyerési Folyamat
+## 2. Szimbolum & Graf Kinyeresi Folyamat
 
 ```
-[Forráskód Fájl] 
+[Forraskod Fajl] 
        │
        ▼
  [Tree-sitter Parser] ────► [AST (Abstract Syntax Tree)]
@@ -38,14 +38,14 @@ A determinisztikus parser réteg a **Tree-sitter** (Python kötések: `py-tree-s
                      [Knowledge Engine Indexer]
 ```
 
-### 2.1. Szimbólum Kinyerés (Symbol Extraction)
-A parser átvizsgálja a forráskódot, és kivonja a következő metaadatokat:
-- **Függvények / Metódusok**: Név, paraméterek típusokkal, visszatérési értékek, docstring-ek, sorok száma (StartLine, EndLine).
-- **Osztályok / Interfészek**: Tagváltozók, öröklődési kapcsolatok, láthatóság (public/private/protected).
-- **Import / Export Nyilatkozatok**: Fájlok közötti statikus függőségi háló.
+### 2.1. Szimbolum Kinyeres (Symbol Extraction)
+A parser atvizsgalja a forraskodot, es kivonja a kovetkezo metaadatokat:
+- **Fuggvenyek / Metodusok**: Nev, parameterek tipusokkal, visszateresi ertekek, docstring-ek, sorok szama (StartLine, EndLine).
+- **Osztalyok / Interfeszek**: Tagvaltozok, oroklodesi kapcsolatok, lathatosag (public/private/protected).
+- **Import / Export Nyilatkozatok**: Fajlok kozotti statikus fuggosegi halo.
 
-### 2.2. Hívási Gráf (Call Graph) Építés
-A rendszer determinisztikusan feltérképezi, hogy az egyes függvények mely más függvényeket hívják meg:
+### 2.2. Hivasi Graf (Call Graph) Epites
+A rendszer determinisztikusan felterkepezi, that the egyes fuggvenyek mely mas fuggvenyeket hivjak meg:
 ```json
 {
   "caller": "src/services/UserService.ts::createUser",
@@ -57,15 +57,15 @@ A rendszer determinisztikusan feltérképezi, hogy az egyes függvények mely m�
 
 ---
 
-## 3. Inkrementális Elemzés és Invalidation
+## 3. Inkrementalis Elemzes es Invalidation
 
-1. **File Watcher Integration**: A rendszer a gazdagép fájlrendszer eseményeit (`watchdog` / `inotify`) figyeli.
-2. **Delta Parsing**: Amikor egy ágens módosít egy fájlt, a Polyglot Analyzer **csak a módosított fájlt** és annak közvetlen függőségeit parse-olja újra Tree-sitter segítségével.
-3. **Inkrementális AST Frissítés**: A teljes projekt kódjának újrapasszolása helyett ez ezredmásodpercek alatt frissíti a szimbólumtáblát.
+1. **File Watcher Integration**: A rendszer a gazdagep fajlrendszer esemenyeit (`watchdog` / `inotify`) figyeli.
+2. **Delta Parsing**: Amikor egy agens modosit egy fajlt, a Polyglot Analyzer **csak a modositott fajlt** es annak kozvetlen fuggosegeit parse-olja ujra Tree-sitter segitsegevel.
+3. **Inkrementalis AST Frissites**: A teljes projekt kodjanak ujrapasszolasa instead of ez ezredmasodpercek alatt frissiti a szimbolumtablat.
 
 ---
 
-## 4. Példa: Py-Tree-Sitter Integrációs Interfész (Python)
+## 4. Pelda: Py-Tree-Sitter Integracios Interfesz (Python)
 
 ```python
 from tree_sitter import Language, Parser
@@ -83,7 +83,7 @@ class PolyglotAnalyzer:
 
     def _extract_symbols(self, node, source_code: bytes):
         symbols = []
-        # Tree Sitter S-expression query vagy AST bejárás
+        # Tree Sitter S-expression query vagy AST bejaras
         for child in node.children:
             if child.type in ("function_declaration", "class_declaration", "interface_declaration"):
                 name_node = child.child_by_field_name("name")

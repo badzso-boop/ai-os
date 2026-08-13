@@ -1,70 +1,70 @@
 # 02. Orchestrator Core Specification
 
-Az **Orchestrator Core** az AI-OS központi vezérlőegysége. Python 3.12+ nyelven íródott, és aszinkron eseményhurkot (`asyncio`) használ a nagyfokú párhuzamosíthatóság és alacsony válaszidő érdekében.
+Az **Orchestrator Core** az AI-OS kozponti vezerloegysege. Python 3.12+ nyelven irodott, es aszinkron esemenyhurkot (`asyncio`) hasznal a nagyfoku parhuzamosithatosag es alacsony valaszido erdekeben.
 
 ---
 
-## 1. DAG Planner (Tervező Modul)
+## 1. DAG Planner (Tervezo Modul)
 
-A **DAG Planner** felelős a felhasználó által megadott magas szintű kérések (Epic / User Story) felbontásáért atomi feladatokra (Tasks), valamint ezekből egy **Directed Acyclic Graph (DAG)** felépítéséért.
+A **DAG Planner** is responsible for felhasznalo altal megadott magas szintu keresek (Epic / User Story) felbontasaert atomi feladatokra (Tasks), as well as ezekbol egy **Directed Acyclic Graph (DAG)** felepiteseert.
 
-### 1.1. Feladat Csomó (Task Node) Struktúra
-Minden feladatcsomó az alábbi attribútumokkal rendelkezik:
+### 1.1. Feladat Csomo (Task Node) Struktura
+Minden feladatcsomo az alabbi attributumokkal rendelkezik:
 
 ```python
 from pydantic import BaseModel, Field
 from typing import List, Set, Optional, Literal
 
 class TaskNode(BaseModel):
-    id: str = Field(..., description="Egyedi feladat azonosító (pl. TASK-001)")
+    id: str = Field(..., description="Egyedi feladat azonosito (pl. TASK-001)")
     title: str
     description: str
     risk_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-    target_files: List[str] = Field(..., description="Érintett fájlok listája")
-    read_set: Set[str] = Field(default_factory=set, description="Olvasási zárolás alá eső fájlok")
-    write_set: Set[str] = Field(default_factory=set, description="Írási zárolás alá eső fájlok")
-    dependencies: List[str] = Field(default_factory=list, description="Szülő feladat azonosítók")
+    target_files: List[str] = Field(..., description="Erintett fajlok listaja")
+    read_set: Set[str] = Field(default_factory=set, description="Olvasasi zarolas ala eso fajlok")
+    write_set: Set[str] = Field(default_factory=set, description="Irasi zarolas ala eso fajlok")
+    dependencies: List[str] = Field(default_factory=list, description="Szulo feladat azonositok")
     status: Literal["PENDING", "READY", "RUNNING", "COMPLETED", "FAILED", "BLOCKED"] = "PENDING"
     max_retries: int = 3
     retry_count: int = 0
 ```
 
-### 1.2. Topológiai Sorrend és Ciklusdetektálás
-A DAG Planner a `networkx` könyvtárat használja a feladatfüggőségi gráf kezelésére:
-- A ciklikus függőségeket a kódgenerálás előtt detektálja és visszadobja a Planner LLM-nek korrigálásra (`networkx.is_directed_acyclic_graph`).
-- A végrehajtás topológiai sorrendben (`topological_sort`) vagy függőségi szintenkénti párhuzamosítással történik.
+### 1.2. Topologiai Sorrend es Ciklusdetektalas
+A DAG Planner a `networkx` konyvtarat hasznalja a feladatfuggosegi graf kezelesere:
+- A ciklikus fuggosegeket a kodgeneralas elott detektalja es visszadobja a Planner LLM-nek korrigalasra (`networkx.is_directed_acyclic_graph`).
+- A vegrehajtas topologiai sorrendben (`topological_sort`) vagy fuggosegi szintenkenti parhuzamositassal tortenik.
 
 ---
 
-## 2. Dynamic Scheduler (Ütemező Modul)
+## 2. Dynamic Scheduler (Utemezo Modul)
 
-A **Dynamic Scheduler** felelős a `READY` állapotú feladatok kiosztásáért a legoptimálisabb AI modellhez (MCP Adapter).
+A **Dynamic Scheduler** is responsible for `READY` allapotu feladatok kiosztasaert a legoptimalisabb AI modellhez (MCP Adapter).
 
-### 2.1. Modell Kiválasztási Mátrix (Cost & Risk Awareness)
+### 2.1. Modell Kivalasztasi Matrix (Cost & Risk Awareness)
 
-A rendszer a feladat kockázati szintje és a módosítandó réteg alapján választ modellt:
+A rendszer a feladat kockazati szintje and the modositando reteg based on valaszt modellt:
 
-| Risk Level | Feladat Típusa | Ajánlott AI Modell | Költség / Token Profil |
+| Risk Level | Feladat Tipusa | Ajanlott AI Modell | Koltseg / Token Profil |
 | :--- | :--- | :--- | :--- |
-| **LOW** | CSS/Style igazítások, dokumentáció frissítés, triviális unit tesztek | Gemini 1.5 Flash / DeepSeek V3 | Extremely Low Cost |
-| **MEDIUM** | Új UI komponens, meglévő függvény refaktorálása, bugfix | GPT-4o-mini / Claude 3.5 Haiku | Low/Medium Cost |
-| **HIGH** | Új API végpont, adatbázis séma módosítás, üzleti logika | Claude 3.5 Sonnet / GPT-4o | Premium Model |
-| **CRITICAL** | Architektúra váltás, biztonsági modul, komplex algoritmikus DAG | Claude 3.5 Sonnet (High Temp/Reasoning) | Maximum Reasoning |
+| **LOW** | CSS/Style igazitasok, dokumentacio frissites, trivialis unit tesztek | Gemini 1.5 Flash / DeepSeek V3 | Extremely Low Cost |
+| **MEDIUM** | Uj UI komponens, meglevo fuggveny refaktoralasa, bugfix | GPT-4o-mini / Claude 3.5 Haiku | Low/Medium Cost |
+| **HIGH** | Uj API vegpont, adatbazis sema modositas, uzleti logika | Claude 3.5 Sonnet / GPT-4o | Premium Model |
+| **CRITICAL** | Architektura valtas, biztonsagi modul, komplex algoritmikus DAG | Claude 3.5 Sonnet (High Temp/Reasoning) | Maximum Reasoning |
 
-### 2.2. Terhelés- és Kóta-Kezelés (Rate Limiting)
-- A Scheduler nyomon követi a meglévő API kulcsok **TPM (Token Per Minute)** és **RPM (Request Per Minute)** korlátait.
-- Ha egy prémium modell elérte a limitet, a Scheduler feladat-várakoztatást (Backoff) léptet életbe, vagy átirányítja a feladatot egy egyenértékű tartalék (fallback) modellhez.
+### 2.2. Terheles- es Kota-Kezeles (Rate Limiting)
+- A Scheduler nyomon koveti a meglevo API kulcsok **TPM (Token Per Minute)** es **RPM (Request Per Minute)** korlatait.
+- Ha egy premium modell elerte a limitet, a Scheduler feladat-varakoztatast (Backoff) leptet eletbe, vagy atiranyitja a feladatot egy egyenerteku tartalek (fallback) modellhez.
 
 ---
 
-## 3. Lock Manager (Párhuzamossági Zárolás Kezelő)
+## 3. Lock Manager (Parhuzamossagi Zarolas Kezelo)
 
-A több ágens általi egyidejű kódmódosítás és a Merge Konfliktusok elkerülése érdekében az AI-OS egy **Granuláris Fájl Zároló Rendszert** alkalmaz.
+A tobb agens altali egyideju kodmodositas and the Merge Konfliktusok elkerulese erdekeben az AI-OS egy **Granularis Fajl Zarolo Rendszert** alkalmaz.
 
-### 3.1. Read Set / Write Set Szabályok
-Minden feladat deklarálja a hozzáférési igényét:
-- **Shared Read Lock (`read_set`)**: Több feladat is olvashatja ugyanazt a fájlt egyidejűleg.
-- **Exclusive Write Lock (`write_set`)**: Egy fájlt egy adott pillanatban csak egyetlen aktív feladat módosíthat (`write_set`).
+### 3.1. Read Set / Write Set Szabalyok
+Minden feladat deklaralja a hozzaferesi igenyet:
+- **Shared Read Lock (`read_set`)**: Tobb feladat is olvashatja ugyanazt a fajlt egyidejuleg.
+- **Exclusive Write Lock (`write_set`)**: Egy fajlt egy adott pillanatban csak egyetlen aktiv feladat modosithat (`write_set`).
 
 ```python
 import asyncio
@@ -79,12 +79,12 @@ class LockManager:
     async def acquire_locks(self, task_id: str, read_set: Set[str], write_set: Set[str]) -> bool:
         async with self._lock_condition:
             while True:
-                # Ellenőrizzük, hogy bármelyik write_set fájl zárolva van-e (akár olvasásra, akár írásra)
+                # Ellenorizzuk, hogy barmelyik write_set fajl zarolva van-e (akar olvasasra, akar irasra)
                 write_conflict = any(f in self._write_locks or self._read_locks.get(f, 0) > 0 for f in write_set)
                 read_conflict = any(f in self._write_locks for f in read_set)
                 
                 if not write_conflict and not read_conflict:
-                    # Zárolások lefoglalása
+                    # Zarolasok lefoglalasa
                     for f in read_set:
                         self._read_locks[f] = self._read_locks.get(f, 0) + 1
                     for f in write_set:
@@ -105,5 +105,5 @@ class LockManager:
             self._lock_condition.notify_all()
 ```
 
-### 3.2. Párhuzamos Végrehajtás Git Worktrees Segítségével
-Amennyiben két független feladat Write Set-je diszjunkt (`TaskA.write_set ∩ TaskB.write_set = ∅`), a Lock Manager engedélyezi a két feladat **párhuzamos futtatását** külön Git Worktree környezetben.
+### 3.2. Parhuzamos Vegrehajtas Git Worktrees Segitsegevel
+Amennyiben ket fuggetlen feladat Write Set-je diszjunkt (`TaskA.write_set ∩ TaskB.write_set = ∅`), a Lock Manager engedelyezi a ket feladat **parhuzamos futtatasat** kulon Git Worktree kornyezetben.

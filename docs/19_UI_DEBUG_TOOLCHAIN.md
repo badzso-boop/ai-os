@@ -1,422 +1,422 @@
-# 19. UI Debug Toolchain — determinisztikus UI-elemzés + kétlépcsős modell-routing
+# 19. UI Debug Toolchain — determinisztikus UI-elemzes + ketlepcsos modell-routing
 
-> **Státusz: tervdokumentum (design doc).** Ez a modul MÉG NINCS implementálva. A
-> dokumentum a beépítés tervét, a moduláris felépítést és a meglévő AI-OS
-> architektúrába (Phase 1 analyzer, MCP tools, sandbox, scheduler) illesztést
-> írja le. A kód konvenció szerint angol; a próza magyar (lásd `CLAUDE.md`
+> **Statusz: design document (design doc).** This module NOT YET implemented. A
+> dokumentum a beepites tervet, a modularis felepitest and the meglevo AI-OS
+> architekturaba (Phase 1 analyzer, MCP tools, sandbox, scheduler) illesztest
+> irja le. A kod konvencio according to angol; a proza magyar (lasd `CLAUDE.md`
 > "Language note").
 
 ---
 
-## 1. Motiváció
+## 1. Motivacio
 
-A felhasználó tipikus hibabejelentése nem kód, hanem **viselkedés**:
+A felhasznalo tipikus hibabejelentese nem kod, hanem **viselkedes**:
 
-> „Az oldalon a *Mentés* gomb nem csinál semmit."
-> „A mobil menü nem nyílik ki."
-> „A kosárba rakás után nem frissül a szám a fejlécben."
+> „Az oldalon a *Mentes* gomb nem csinal semmit."
+> „A mobil menu nem nyilik ki."
+> „A kosarba rakas utan nem frissul a szam a fejlecben."
 
-A naiv megoldás az volna, hogy az egész `index.html` + a teljes CSS + a teljes JS
-bundle-t bezúdítjuk egy drága modellbe, és megkérjük, „találd meg a hibát". Ez
-három okból rossz:
+A naiv megoldas az volna, that the egesz `index.html` + a teljes CSS + a teljes JS
+bundle-t bezuditjuk egy draga modellbe, es megkerjuk, „talald meg a hibat". Ez
+harom okbol rossz:
 
-1. **Kontextus-robbanás.** Egy modern SPA több százezer token nyers kódot jelent
-   (bundle, framework, CSS). A hiba viszont jellemzően 1–3 elem + 1 handler
-   körül van. A többi tiszta token-pazarlás — szemben az AI-OS 2. alapelvével
+1. **Kontextus-robbanas.** Egy modern SPA tobb szazezer token nyers kodot jelent
+   (bundle, framework, CSS). A hiba viszont jellemzoen 1–3 elem + 1 handler
+   korul van. A tobbi tiszta token-pazarlas — szemben az AI-OS 2. alapelvevel
    (*Knowledge Before Generation*).
-2. **Az LLM rosszul „lát".** A statikus kódból nehéz megmondani, hogy egy gomb
-   *futásidőben* le van-e takarva egy overlay-jel, `pointer-events: none`-e, van-e
-   ténylegesen bekötött listener, vagy a kattintásra induló fetch 404-et ad. Ez
-   **futásidejű, determinisztikusan mérhető** információ.
-3. **Drága modellt olvasásra használunk.** Egy nagy DOM/CSS/hálózati dump
-   *átolvasása és szűrése* nem igényel csúcsmodellt — ezt egy olcsó modell is
-   elvégzi. A drága modellt csak a tényleges **javításra** kell hívni.
+2. **Az LLM rosszul „lat".** A statikus kodbol nehez megmondani, hogy egy gomb
+   *futasidoben* le van-e takarva egy overlay-jel, `pointer-events: none`-e, van-e
+   tenylegesen bekotott listener, vagy a kattintasra indulo fetch 404-et ad. Ez
+   **futasideju, determinisztikusan merheto** informacio.
+3. **Draga modellt olvasasra hasznalunk.** Egy nagy DOM/CSS/halozati dump
+   *atolvasasa es szurese* nem igenyel csucsmodellt — ezt egy olcso modell is
+   elvegzi. A draga modellt csak a tenyleges **javitasra** kell hivni.
 
-Ez a modul az AI-OS 1. alapelvét (*Compiler First* — amit determinisztikusan meg
-lehet csinálni, arra ne égess AI tokent) alkalmazza a UI-ra: **előbb
-determinisztikus eszközök térképezik fel a UI-t és gyűjtik a bizonyítékokat,
-aztán egy olcsó modell triage-el, és csak a fókuszált javítás megy drága
+This module az AI-OS 1. alapelvet (*Compiler First* — amit determinisztikusan meg
+lehet csinalni, arra ne egess AI tokent) alkalmazza a UI-ra: **elobb
+determinisztikus eszkozok terkepezik fel a UI-t es gyujtik a bizonyitekokat,
+aztan egy olcso modell triage-el, es csak a fokuszalt javitas megy draga
 modellhez.**
 
 ---
 
-## 2. A kétlépcsős filozófia egy mondatban
+## 2. A ketlepcsos filozofia egy mondatban
 
 ```
-Determinisztikus gyűjtés (0 token)  →  Olcsó modell: diagnózis/triage  →  Drága modell: javítás  →  Sandbox (Playwright) validáció  →  PR
+Determinisztikus gyujtes (0 token)  →  Olcso modell: diagnozis/triage  →  Draga modell: javitas  →  Sandbox (Playwright) validacio  →  PR
 ```
 
-A drága modell soha nem lát nyers, több százezer tokenes dumpot — csak egy
-tömörített, gyanú-rangsorolt diagnózist + a 1–3 érintett fájl/selector fókuszált
-kontextusát.
+A draga modell soha nem lat nyers, tobb szazezer tokenes dumpot — csak egy
+tomoritett, gyanu-rangsorolt diagnozist + a 1–3 erintett fajl/selector fokuszalt
+kontextusat.
 
 ---
 
-## 3. Architektúra-áttekintés
+## 3. Architektura-attekintes
 
 ```
-[Felhasználói hibabejelentés: "a Mentés gomb nem működik"]
+[Felhasznaloi hibabejelentes: "a Mentes gomb nem mukodik"]
         │
         ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  DETERMINISZTIKUS UI-COLLECTOR RÉTEG  (0 LLM token)                   │
+│  DETERMINISZTIKUS UI-COLLECTOR RETEG  (0 LLM token)                   │
 │                                                                       │
 │  ┌────────────────────┐   ┌────────────────────┐   ┌──────────────┐  │
 │  │ Static UI Graph     │   │ Dynamic Playwright │   │ Console/Net   │  │
-│  │ (HTML/CSS/JS AST-ből)│  │ Probe (headless)   │   │ Capture       │  │
+│  │ (HTML/CSS/JS AST-bol)│  │ Probe (headless)   │   │ Capture       │  │
 │  └─────────┬──────────┘   └─────────┬──────────┘   └──────┬───────┘  │
 │            └───────────────┬────────┴───────────────┬─────┘          │
 │                            ▼                         ▼                │
 │                   [UI Knowledge Graph]      [Interaction Report]      │
 │                            │                         │                │
 │                            ▼                         ▼                │
-│                   [Determinisztikus gyanú-detektorok (heuristics)]    │
+│                   [Determinisztikus gyanu-detektorok (heuristics)]    │
 └────────────────────────────┬──────────────────────────────────────---┘
                              ▼
-        [Tömörített UI-kontextus + gyanú-rangsor]  (build_ui_context_cache)
+        [Tomoritett UI-kontextus + gyanu-rangsor]  (build_ui_context_cache)
                              │
                              ▼
-        ┌────────────── OLCSÓ MODELL (triage) ──────────────┐
+        ┌────────────── OLCSO MODELL (triage) ──────────────┐
         │  Bemenet: a nagy determinisztikus dump             │
-        │  Kimenet: "gyökérok-hipotézis + 1–3 érintett       │
-        │           fájl/selector + a szükséges olvasnivaló" │
+        │  Kimenet: "gyokerok-hipotezis + 1–3 erintett       │
+        │           fajl/selector + a szukseges olvasnivalo" │
         └───────────────────────┬────────────────────────---┘
                              ▼
-        ┌────────────── DRÁGA MODELL (fix) ─────────────────┐
-        │  Bemenet: CSAK a fókuszált kontextus + a diagnózis │
-        │  Eszközök: apply_file_edit / propose_file_patch /  │
+        ┌────────────── DRAGA MODELL (fix) ─────────────────┐
+        │  Bemenet: CSAK a fokuszalt kontextus + a diagnozis │
+        │  Eszkozok: apply_file_edit / propose_file_patch /  │
         │           ui_probe_element / trigger_sandbox_valid.│
         └───────────────────────┬────────────────────────---┘
                              ▼
-        [Sandbox: Playwright reprodukció + assertion + regressziós teszt]
+        [Sandbox: Playwright reprodukcio + assertion + regresszios teszt]
                              │
                              ▼
-                       [PR / merge]  (a meglévő EpicRunner/PR flow-n)
+                       [PR / merge]  (a meglevo EpicRunner/PR flow-n)
 ```
 
 ---
 
-## 4. A determinisztikus collector réteg
+## 4. A determinisztikus collector reteg
 
-Három, egymást kiegészítő forrás. Mindegyik **0 AI token**, mindegyik gépi
-kimenetet ad, amit gráffá/riporttá konszolidálunk.
+Harom, egymast kiegeszito forras. Mindegyik **0 AI token**, mindegyik gepi
+kimenetet ad, amit graffa/riportta konszolidalunk.
 
 ### 4.1. Static UI Graph builder (`ai_os/ui/static_graph.py`)
 
-Épít a **Phase 1 analyzerre**: a `LanguageProfile` már parse-olja a HTML-t
-(`tree-sitter-html`) és a CSS-t (`tree-sitter-css`), a JS/TS-t pedig teljes
-szimbólum- és hívási gráffal (`ai_os/analyzer/`). Ez a modul ezekből egy
-**UI-specifikus gráfot** épít, ami összeköti a három világot (DOM ↔ CSS ↔ JS).
+Epit a **Phase 1 analyzerre**: a `LanguageProfile` mar parse-olja a HTML-t
+(`tree-sitter-html`) and the CSS-t (`tree-sitter-css`), a JS/TS-t pedig teljes
+szimbolum- es hivasi graffal (`ai_os/analyzer/`). This module ezekbol egy
+**UI-specifikus grafot** epit, ami osszekoti a harom vilagot (DOM ↔ CSS ↔ JS).
 
 Amit kinyer:
 
-- **Interaktív elemek** a HTML-ből: `<button>`, `<a href>`, `<input>`,
-  `<select>`, `<textarea>`, `<form>`, valamint bármi `role="button"`,
-  `onclick=`, `tabindex`, `contenteditable` attribútummal. Framework-sablonoknál
-  (JSX/TSX/Vue/Svelte) a template-részt is (lásd 4.4 korlátok).
-- **Selectorok / azonosítók** minden elemhez: `id`, `class` lista,
-  `data-testid`, `aria-label`, `name`, látható szöveg (text content) — ez a
-  horgony, amivel a hibabejelentés („a *Mentés* gomb") az elemre képezhető.
-- **CSS-szabályok**, amelyek egy elemre hatnak: a `tree-sitter-css`-ből kinyert
-  szelektorok illesztése az elemekre (specificitás-sorrendben), külön kiemelve a
-  **viselkedést befolyásoló** tulajdonságokat: `display`, `visibility`,
+- **Interaktiv elemek** a HTML-bol: `<button>`, `<a href>`, `<input>`,
+  `<select>`, `<textarea>`, `<form>`, as well as barmi `role="button"`,
+  `onclick=`, `tabindex`, `contenteditable` attributummal. Framework-sablonoknal
+  (JSX/TSX/Vue/Svelte) a template-reszt is (lasd 4.4 korlatok).
+- **Selectorok / azonositok** minden elemhez: `id`, `class` lista,
+  `data-testid`, `aria-label`, `name`, lathato szoveg (text content) — ez a
+  horgony, amivel a hibabejelentes („a *Mentes* gomb") az elemre kepezheto.
+- **CSS-szabalyok**, amelyek egy elemre hatnak: a `tree-sitter-css`-bol kinyert
+  szelektorok illesztese az elemekre (specificitas-sorrendben), kulon kiemelve a
+  **viselkedest befolyasolo** tulajdonsagokat: `display`, `visibility`,
   `opacity`, `pointer-events`, `position`+`z-index`, `cursor`, `disabled`
-  pszeudo, `@media` láthatóság.
-- **Eseménykezelők** a JS-ből: inline `onclick`; `addEventListener('click', …)`
-  hívások (a Phase 1 call-graph már látja a hívási helyeket); framework-handlerek
+  pszeudo, `@media` lathatosag.
+- **Esemenykezelok** a JS-bol: inline `onclick`; `addEventListener('click', …)`
+  hivasok (a Phase 1 call-graph mar latja a hivasi helyeket); framework-handlerek
   (`onClick={…}` JSX-ben, `@click` Vue-ban, `on:click` Svelte-ben). Minden
-  handlerhez visszakeressük, **melyik JS-szimbólum** a kezelő (`fetch_symbol_
-  definition`-nel a skeleton is elérhető).
-- **Bekötés (wiring)**: melyik selector melyik handlerhez van kötve, és melyik
-  handler melyik hálózati hívást/DOM-mutációt indítja (statikusan, best-effort).
+  handlerhez visszakeressuk, **melyik JS-szimbolum** a kezelo (`fetch_symbol_
+  definition`-nel a skeleton is elerheto).
+- **Bekotes (wiring)**: melyik selector melyik handlerhez van kotve, es melyik
+  handler melyik halozati hivast/DOM-mutaciot inditja (statikusan, best-effort).
 
-Gráfséma (a Phase 1 `KnowledgeEngine` `networkx.DiGraph` mintájára):
+Grafsema (a Phase 1 `KnowledgeEngine` `networkx.DiGraph` mintajara):
 
-| Node típus     | Jelentés |
+| Node tipus     | Jelentes |
 | -------------- | -------- |
-| `ElementNode`  | egy interaktív DOM-elem (selector-készlettel, forrás fájl:sor) |
+| `ElementNode`  | egy interaktiv DOM-elem (selector-keszlettel, forras fajl:sor) |
 | `SelectorNode` | egy id/class/data-testid/aria-label horgony |
-| `StyleRuleNode`| egy CSS-szabály (viselkedés-releváns tulajdonságokkal) |
-| `HandlerNode`  | egy eseménykezelő (típus + a kezelő JS-szimbólum FQN-je) |
-| `JsSymbolNode` | (a meglévő `FunctionNode`) a handler implementáció |
-| `NetworkNode`  | egy statikusan látott `fetch`/`axios`/`XHR` endpoint |
+| `StyleRuleNode`| egy CSS-szabaly (viselkedes-relevans tulajdonsagokkal) |
+| `HandlerNode`  | egy esemenykezelo (tipus + a kezelo JS-szimbolum FQN-je) |
+| `JsSymbolNode` | (a meglevo `FunctionNode`) a handler implementacio |
+| `NetworkNode`  | egy statikusan latott `fetch`/`axios`/`XHR` endpoint |
 
-| Él kind        | Irány / jelentés |
+| El kind        | Irany / jelentes |
 | -------------- | ---------------- |
 | `MATCHES`      | SelectorNode → ElementNode |
 | `STYLED_BY`    | ElementNode → StyleRuleNode |
 | `HANDLED_BY`   | ElementNode → HandlerNode |
 | `IMPLEMENTED_BY`| HandlerNode → JsSymbolNode |
 | `CALLS`        | JsSymbolNode → NetworkNode/JsSymbolNode (Phase 1 CALLS) |
-| `OCCLUDES`     | ElementNode → ElementNode (egy elem a stacking/pozíció alapján lefedi a másikat — best-effort statikus becslés, futásidőben a dinamikus probe erősíti meg) |
+| `OCCLUDES`     | ElementNode → ElementNode (egy elem a stacking/pozicio based on lefedi a masikat — best-effort statikus becsles, futasidoben a dinamikus probe erositi meg) |
 
 ### 4.2. Dynamic Playwright probe (`ai_os/ui/playwright_probe.py`)
 
-A statikus gráf megmondja, *mi lehet* — a dinamikus probe megmondja, *mi van
-valójában* futásidőben. **Determinisztikus, szkriptelt, LLM nélkül.** Headless
-Chromiumot indít (Playwright) egy futó dev-serveren vagy a buildelt statikus
-oldalon, és minden interaktív elemre kimér egy strukturált riportot:
+A statikus graf megmondja, *mi lehet* — a dinamikus probe megmondja, *mi van
+valojaban* futasidoben. **Determinisztikus, szkriptelt, LLM nelkul.** Headless
+Chromiumot indit (Playwright) egy futo dev-serveren vagy a buildelt statikus
+oldalon, es minden interaktiv elemre kimer egy strukturalt riportot:
 
-- **Láthatóság & geometria**: `boundingBox`, `isVisible`, `isEnabled`, a
-  viewportban van-e, átfedések (a tényleges *elementFromPoint* a gomb közepén —
-  ha nem a gomb jön vissza, valami **letakarja**; ez a klasszikus „a gomb ott
-  van, de nem kattintható" hiba).
-- **Számított stílusok**: `pointer-events`, `opacity`, `visibility`, `display`,
-  `cursor`, `z-index` — a futásidejű, effektív érték (nem a statikus CSS).
-- **Tényleg bekötött listenerek**: CDP-n keresztül (`DOMDebugger.
-  getEventListeners`) — van-e egyáltalán `click` listener, és hány (dupla-
-  bekötés detektálás).
-- **Kattintás-szimuláció** (izoláltan, egyenként): mi történik kattintásra —
-  indul-e hálózati kérés (és milyen státusszal tér vissza), dob-e a konzol
-  hibát, változik-e a DOM (mutation observer), van-e navigáció, `preventDefault`
-  megeszi-e az eseményt.
-- **Akadálymentességi fa** (accessibility tree) részlet az elemre — a `role`/
-  `name` tényleges, kiszámított értéke (ha a gombnak nincs elérhető neve, az is
-  egy hiba-osztály).
-- **Screenshot** az elemről + a környezetéről (a HITL PR-be tehető vizuális
-  bizonyíték).
+- **Lathatosag & geometria**: `boundingBox`, `isVisible`, `isEnabled`, a
+  viewportban van-e, atfedesek (a tenyleges *elementFromPoint* a gomb kozepen —
+  ha nem a gomb jon vissza, valami **letakarja**; ez a klasszikus „a gomb ott
+  van, de nem kattinthato" hiba).
+- **Szamitott stilusok**: `pointer-events`, `opacity`, `visibility`, `display`,
+  `cursor`, `z-index` — a futasideju, effektiv ertek (nem a statikus CSS).
+- **Tenyleg bekotott listenerek**: CDP-n keresztul (`DOMDebugger.
+  getEventListeners`) — van-e egyaltalan `click` listener, es hany (dupla-
+  bekotes detektalas).
+- **Kattintas-szimulacio** (izolaltan, egyenkent): mi tortenik kattintasra —
+  indul-e halozati keres (es milyen statusszal ter vissza), dob-e a konzol
+  hibat, valtozik-e a DOM (mutation observer), van-e navigacio, `preventDefault`
+  megeszi-e az esemenyt.
+- **Akadalymentessegi fa** (accessibility tree) reszlet az elemre — a `role`/
+  `name` tenyleges, kiszamitott erteke (ha a gombnak nincs elerheto neve, az is
+  egy hiba-osztaly).
+- **Screenshot** az elemrol + a kornyezeterol (a HITL PR-be teheto vizualis
+  bizonyitek).
 
-Kimenet: egy `InteractionReport` — elemenként a fenti mezők, JSON-ban.
+Kimenet: egy `InteractionReport` — elemenkent a fenti mezok, JSON-ban.
 
-> **Miért izoláltan, egyenként kattint?** Mert egy „minden gombot végigkattintó"
-> szkript mellékhatásai (navigáció, állapotváltozás) elrontanák a többi elem
-> mérését. A probe minden elem előtt visszaállítja az oldalt (reload vagy
-> snapshot-restore), így minden mérés reprodukálható és független.
+> **Miert izolaltan, egyenkent kattint?** Mert egy „minden gombot vegigkattinto"
+> szkript mellekhatasai (navigacio, allapotvaltozas) elrontanak a tobbi elem
+> mereset. A probe minden elem elott visszaallitja az oldalt (reload vagy
+> snapshot-restore), igy minden meres reprodukalhato es fuggetlen.
 
 ### 4.3. Console / Network capture (`ai_os/ui/runtime_capture.py`)
 
-A probe futása alatt globálisan gyűjtjük: JS-hibák (`pageerror`), konzol-
-`error`/`warn`, sikertelen hálózati kérések (4xx/5xx), CSP-violation-ök,
-mixed-content figyelmeztetések. Ezek gyakran önmagukban rámutatnak a gyökérokra
-(pl. a *Mentés* kattintás `POST /api/save` → 405-öt kap → a handler néma).
+A probe futasa alatt globalisan gyujtjuk: JS-hibak (`pageerror`), konzol-
+`error`/`warn`, sikertelen halozati keresek (4xx/5xx), CSP-violation-ok,
+mixed-content figyelmeztetesek. Ezek gyakran onmagukban ramutatnak a gyokerokra
+(pl. a *Mentes* kattintas `POST /api/save` → 405-ot kap → a handler nema).
 
-### 4.4. Framework-tudatosság és korlátok
+### 4.4. Framework-tudatossag es korlatok
 
-- **Sablon-alapú frameworkök (React/Vue/Svelte/Angular):** a *statikus* handler-
-  detektálás best-effort (a JSX `onClick={fn}` felismerhető, de a runtime-ban
-  generált handlerek nem mindig). Ezt a **dinamikus probe kompenzálja**: a
-  renderelt DOM-on a tényleges listenerek mérhetők, függetlenül attól, hogy a
-  framework hogyan kötötte be őket. A két forrás együtt robusztus.
-- **SPA hidratáció / időzítés:** a probe megvárja a `networkidle`-t és egy
-  konfigurálható „ready" jelet (pl. egy selector megjelenését), mielőtt mér.
-- **Auth-gated oldalak:** a probe elfogad egy opcionális előkészítő szkriptet
-  (login-lépések vagy egy beinjektált session-cookie/token), `.ai-os/ui.json`-
-  ban deklarálva — soha nem hardcode-olt titok (lásd 9. Biztonság).
+- **Sablon-alapu frameworkok (React/Vue/Svelte/Angular):** a *statikus* handler-
+  detektalas best-effort (a JSX `onClick={fn}` felismerheto, de a runtime-ban
+  generalt handlerek nem mindig). Ezt a **dinamikus probe kompenzalja**: a
+  renderelt DOM-on a tenyleges listenerek merhetok, fuggetlenul attol, that the
+  framework hogyan kototte be oket. A ket forras egyutt robusztus.
+- **SPA hidratacio / idozites:** a probe megvarja a `networkidle`-t es egy
+  konfiguralhato „ready" jelet (pl. egy selector megjeleneset), mielott mer.
+- **Auth-gated oldalak:** a probe elfogad egy opcionalis elokeszito szkriptet
+  (login-lepesek vagy egy beinjektalt session-cookie/token), `.ai-os/ui.json`-
+  ban deklaralva — soha nem hardcode-olt titok (lasd 9. Biztonsag).
 
 ---
 
-## 5. Determinisztikus gyanú-detektorok (`ai_os/ui/detectors.py`)
+## 5. Determinisztikus gyanu-detektorok (`ai_os/ui/detectors.py`)
 
-A gráf + a riport fölött **LLM nélküli heurisztikák** futnak, amelyek a
-leggyakoribb UI-bughoz vezető mintákat megjelölik és **rangsorolják**. Ez adja a
-triage-modellnek a „hova nézz először" listát. Néhány detektor:
+A graf + a riport folott **LLM nelkuli heurisztikak** futnak, amelyek a
+leggyakoribb UI-bughoz vezeto mintakat megjelolik es **rangsoroljak**. Ez adja a
+triage-modellnek a „hova nezz eloszor" listat. Nehany detektor:
 
-| Detektor | Gyanú |
+| Detektor | Gyanu |
 | -------- | ----- |
-| `no_handler` | interaktív elem, amelyhez futásidőben NINCS click-listener |
-| `dead_handler` | a handler egy nem létező JS-szimbólumra/függvényre hivatkozik |
-| `occluded` | az elem közepén az `elementFromPoint` mást ad vissza (letakarva) |
-| `pointer_events_none` | effektív `pointer-events: none` az elemen vagy egy ősén |
-| `hidden_but_present` | `opacity:0` / `visibility:hidden` / `display:none`, de a bejelentés szerint látszania kéne |
-| `disabled` | `disabled` attribútum / `aria-disabled` (szándékos vagy hibás?) |
-| `submit_outside_form` | `type="submit"` gomb `<form>`-on kívül |
-| `duplicate_id` | ugyanaz az `id` többször — a selector nem determinisztikus |
-| `double_bound` | ugyanarra az elemre két click-listener (dupla művelet/verseny) |
-| `handler_throws` | a kattintás-szimuláció JS-hibát dobott |
-| `failed_request` | a kattintásra induló fetch 4xx/5xx-öt adott |
-| `no_accessible_name` | a gombnak nincs elérhető neve (a11y + gyakran törött szelektor) |
-| `nav_swallowed` | `<a>`-ra `preventDefault`, de nincs helyettesítő navigáció |
+| `no_handler` | interaktiv elem, amelyhez futasidoben NINCS click-listener |
+| `dead_handler` | a handler egy nem letezo JS-szimbolumra/fuggvenyre hivatkozik |
+| `occluded` | az elem kozepen az `elementFromPoint` mast ad vissza (letakarva) |
+| `pointer_events_none` | effektiv `pointer-events: none` az elemen vagy egy osen |
+| `hidden_but_present` | `opacity:0` / `visibility:hidden` / `display:none`, de a bejelentes according to latszania kene |
+| `disabled` | `disabled` attributum / `aria-disabled` (szandekos vagy hibas?) |
+| `submit_outside_form` | `type="submit"` gomb `<form>`-on kivul |
+| `duplicate_id` | ugyanaz az `id` tobbszor — a selector nem determinisztikus |
+| `double_bound` | ugyanarra az elemre ket click-listener (dupla muvelet/verseny) |
+| `handler_throws` | a kattintas-szimulacio JS-hibat dobott |
+| `failed_request` | a kattintasra indulo fetch 4xx/5xx-ot adott |
+| `no_accessible_name` | a gombnak nincs elerheto neve (a11y + gyakran torott szelektor) |
+| `nav_swallowed` | `<a>`-ra `preventDefault`, de nincs helyettesito navigacio |
 
-Minden találat hordozza: az érintett elemet (selector + fájl:sor), a bizonyítékot
-(mit mért), és egy súlyt. A hibabejelentés szövegét (a felhasználó „*Mentés*
-gomb") **fuzzy-illesztjük** a selectorokra/szövegre, hogy a gyanúkat a bejelentett
-elem köré rangsoroljuk.
+Minden talalat hordozza: az erintett elemet (selector + fajl:sor), a bizonyitekot
+(mit mert), es egy sulyt. A hibabejelentes szoveget (a felhasznalo „*Mentes*
+gomb") **fuzzy-illesztjuk** a selectorokra/szovegre, that the gyanukat a bejelentett
+elem kore rangsoroljuk.
 
-> Fontos: a detektorok **nem döntenek**, csak jelölnek. A végső diagnózist és a
-> javítást a modellek adják — a detektorok csak drasztikusan szűkítik a
-> keresési teret (Compiler First).
-
----
-
-## 6. MCP tool-felület — mit hív az LLM
-
-A meglévő `ai_os/mcp/mcp_server.py` mintájára új eszközök, amelyeket az agent
-(bármely provider natív tool-callingján át, `dispatch_tool_call`) hívhat. Az
-eszközök **determinisztikusak** — az LLM dolga csak eldönteni, *melyiket* hívja,
-és a kimenetet értelmezni:
-
-- **`ui_scan(target, focus_hint?)`** — lefuttatja a teljes collector réteget
-  (static graph + dynamic probe + capture + detektorok) és visszaadja a
-  **tömörített UI-kontextust** (a `build_ui_context_cache` kimenetét — a Phase 1
-  `build_context_cache` UI-megfelelője): a gyanú-rangsor + az érintett elemek
-  skeletonjai + a releváns CSS/handler kivonatok. Ez a belépő eszköz.
-- **`ui_list_interactive(target)`** — a felhasználó által kért „előre listázott
-  gombok": minden interaktív elem + a bekötési státusza (handler van/nincs,
-  látható, engedélyezett, letakart). Olcsó, gyors térkép.
-- **`ui_probe_element(target, selector)`** — egyetlen elem mély vizsgálata
-  (effektív stílusok, listenerek, kattintás-eredmény, screenshot). Ezt hívja a
-  drága modell, ha egy konkrét elemre kell fókuszálnia — nem az egész oldalt
-  olvassa újra.
-- **`ui_reproduce(target, steps)`** — egy megadott lépés-sorozat (kattints X,
-  írj be Y, várd Z) Playwright-lefuttatása; visszaadja, sikerült-e + a
-  konzol/hálózati eredmény. Ez a „reprodukáld a hibát / igazold a javítást"
-  eszköz — a **sandbox-validáció** is ezt használja.
-- **`fetch_symbol_definition(fqn)`** — (meglévő) a handler JS-szimbólum
-  skeletonjának lekérése.
-- **`apply_file_edit` / `propose_file_patch`** — (meglévő) a tényleges javítás.
-- **`trigger_sandbox_validation`** — (meglévő, Playwright-profillal) a javítás
-  validálása.
-
-`target` = a projekt + egy futtatható előnézet (dev-server URL vagy egy
-`build`-parancs, amit a sandbox futtat) — `.ai-os/ui.json`-ban deklarálva.
+> Fontos: a detektorok **nem dontenek**, csak jelolnek. A vegso diagnozist and the
+> javitast a modellek adjak — a detektorok csak drasztikusan szukitik a
+> keresesi teret (Compiler First).
 
 ---
 
-## 7. Kétlépcsős modell-routing
+## 6. MCP tool-felulet — mit hiv az LLM
 
-A meglévő `DynamicScheduler` + `build_output_summarizer` mintát általánosítjuk
-egy **UI-triage** lépéssé:
+A meglevo `ai_os/mcp/mcp_server.py` mintajara uj eszkozok, amelyeket az agent
+(barmely provider nativ tool-callingjan at, `dispatch_tool_call`) hivhat. Az
+eszkozok **determinisztikusak** — az LLM dolga csak eldonteni, *melyiket* hivja,
+and the kimenetet ertelmezni:
 
-1. **Triage (olcsó, LOW-risk modell).** Bemenet: a `ui_scan` teljes
-   determinisztikus dumpja (nagy, de olcsó modellnek adjuk). Kimenet egy szigorú
-   sémában: `{root_cause_hypothesis, suspected_elements[selector], files_to_read,
-   fix_strategy_summary}`. Ez az „olvasási feladat" — a nagy kontextus itt ég el,
-   de olcsón.
-2. **Fix (drága, HIGH/CRITICAL modell).** Bemenet: CSAK a triage kimenete + a
-   `files_to_read` fókuszált skeletonjai + a gyanús elemek `ui_probe_element`
-   riportjai. A drága modell sosem látja a teljes bundle-t. Eszközökkel javít,
+- **`ui_scan(target, focus_hint?)`** — lefuttatja a teljes collector reteget
+  (static graph + dynamic probe + capture + detektorok) es visszaadja a
+  **tomoritett UI-kontextust** (a `build_ui_context_cache` kimenetet — a Phase 1
+  `build_context_cache` UI-megfeleloje): a gyanu-rangsor + az erintett elemek
+  skeletonjai + a relevans CSS/handler kivonatok. Ez a belepo eszkoz.
+- **`ui_list_interactive(target)`** — a felhasznalo altal kert „elore listazott
+  gombok": minden interaktiv elem + a bekotesi statusza (handler van/nincs,
+  lathato, engedelyezett, letakart). Olcso, gyors terkep.
+- **`ui_probe_element(target, selector)`** — egyetlen elem mely vizsgalata
+  (effektiv stilusok, listenerek, kattintas-eredmeny, screenshot). Ezt hivja a
+  draga modell, ha egy konkret elemre kell fokuszalnia — nem az egesz oldalt
+  olvassa ujra.
+- **`ui_reproduce(target, steps)`** — egy megadott lepes-sorozat (kattints X,
+  irj be Y, vard Z) Playwright-lefuttatasa; visszaadja, sikerult-e + a
+  konzol/halozati eredmeny. Ez a „reprodukald a hibat / igazold a javitast"
+  eszkoz — a **sandbox-validacio** is ezt hasznalja.
+- **`fetch_symbol_definition(fqn)`** — (meglevo) a handler JS-szimbolum
+  skeletonjanak lekerese.
+- **`apply_file_edit` / `propose_file_patch`** — (meglevo) a tenyleges javitas.
+- **`trigger_sandbox_validation`** — (meglevo, Playwright-profillal) a javitas
+  validalasa.
+
+`target` = a projekt + egy futtathato elonezet (dev-server URL vagy egy
+`build`-parancs, amit a sandbox futtat) — `.ai-os/ui.json`-ban deklaralva.
+
+---
+
+## 7. Ketlepcsos modell-routing
+
+A meglevo `DynamicScheduler` + `build_output_summarizer` mintat altalanositjuk
+egy **UI-triage** lepesse:
+
+1. **Triage (olcso, LOW-risk modell).** Bemenet: a `ui_scan` teljes
+   determinisztikus dumpja (nagy, de olcso modellnek adjuk). Kimenet egy szigoru
+   semaban: `{root_cause_hypothesis, suspected_elements[selector], files_to_read,
+   fix_strategy_summary}`. Ez az „olvasasi feladat" — a nagy kontextus itt eg el,
+   de olcson.
+2. **Fix (draga, HIGH/CRITICAL modell).** Bemenet: CSAK a triage kimenete + a
+   `files_to_read` fokuszalt skeletonjai + a gyanus elemek `ui_probe_element`
+   riportjai. A draga modell sosem latja a teljes bundle-t. Eszkozokkel javit,
    majd `ui_reproduce`/`trigger_sandbox_validation`-nel igazol.
 
-Ez pontosan a projekt költség-tudatos filozófiája (risk → model), a UI-debug
+Ez pontosan a projekt koltseg-tudatos filozofiaja (risk → model), a UI-debug
 domainre szabva. A routing az `AI_OS_MODEL_*` / `AI_OS_PROVIDER_ORDER_*` env-eken
-finomhangolható, mint minden más taskra.
+finomhangolhato, mint minden mas taskra.
 
-**Költség-intuíció.** Egy 300 000 tokenes nyers oldal drága modellen ≈ sokszorosa
-annak, mint amikor egy olcsó modell egyszer átolvassa (triage), és a drága modell
-csak egy ~5 000 tokenes fókuszált kontextust kap. A determinisztikus réteg pedig
-eleve leszűri a 300k-t a releváns töredékre, mielőtt bármelyik modell látná.
+**Koltseg-intuicio.** Egy 300 000 tokenes nyers oldal draga modellen ≈ sokszorosa
+annak, mint amikor egy olcso modell egyszer atolvassa (triage), and the draga modell
+csak egy ~5 000 tokenes fokuszalt kontextust kap. A determinisztikus reteg pedig
+eleve leszuri a 300k-t a relevans toredekre, mielott barmelyik modell latna.
 
 ---
 
-## 8. Sandbox-validáció UI-ra
+## 8. Sandbox-validacio UI-ra
 
-A javítás igazolása a meglévő **ephemeral Docker sandboxban** történik, egy
-**Playwright-image profillal** (a `.ai-os/sandbox.json` már támogatja az `image`
-override-ot — pl. `mcr.microsoft.com/playwright:...`). A validáció:
+A javitas igazolasa a meglevo **ephemeral Docker sandboxban** tortenik, egy
+**Playwright-image profillal** (a `.ai-os/sandbox.json` mar tamogatja az `image`
+override-ot — pl. `mcr.microsoft.com/playwright:...`). A validacio:
 
 1. buildeli az oldalt (a projekt `build`/`dev` parancsa),
-2. lefuttatja a `ui_reproduce` lépéseit **assertion-ökkel** (a gomb kattintható,
-   a várt hálózati hívás 2xx, a várt DOM-változás bekövetkezik, nincs konzol-hiba),
-3. a Phase 6 **test-presence** ellenőrzés elvárja, hogy a javításhoz **regressziós
-   teszt** (egy Playwright/komponens-teszt) is készüljön — különben a PR-ben
-   megjelölve „nincs teszt a változáshoz".
+2. lefuttatja a `ui_reproduce` lepeseit **assertion-okkel** (a gomb kattinthato,
+   a vart halozati hivas 2xx, a vart DOM-valtozas bekovetkezik, nincs konzol-hiba),
+3. a Phase 6 **test-presence** ellenorzes elvarja, that the javitashoz **regresszios
+   teszt** (egy Playwright/komponens-teszt) is keszuljon — kulonben a PR-ben
+   megjelolve „nincs teszt a valtozashoz".
 
-A DB-hez hasonlóan a Playwright a `--internal`/`--network none` politikát követi
-(a demó statikus vagy a sandboxon belüli mock-backend ellen fut) — untrusted
-oldal-JS-t futtatunk, ezért izolálva (lásd 9.).
+A DB-hez hasonloan a Playwright a `--internal`/`--network none` politikat koveti
+(a demo statikus vagy a sandboxon beluli mock-backend ellen fut) — untrusted
+oldal-JS-t futtatunk, ezert izolalva (lasd 9.).
 
 ---
 
-## 9. Biztonság
+## 9. Biztonsag
 
 - **Untrusted page JS.** A dinamikus probe idegen JavaScriptet futtat headless
-  böngészőben. Ezt a sandbox-konténerben, hálózati izolációval kell futtatni, hogy
-  ne érje el a host belső szolgáltatásait (a live szerver más projektjeit!). Soha
-  ne a hoston, közvetlenül.
-- **Titkok.** Az auth-gated probe login-adatai/tokenjei sosem hardcode-oltak és
-  sosem kerülnek promptba/PR-be — a `.ai-os/ui.json` env-referenciát tartalmaz,
-  a titok a szokásos `.env`-ből (gitignore-olt) jön, és a `sensitive_files` guard
+  bongeszoben. Ezt a sandbox-kontenerben, halozati izolacioval kell futtatni, hogy
+  ne erje el a host belso szolgaltatasait (a live szerver mas projektjeit!). Soha
+  ne a hoston, kozvetlenul.
+- **Titkok.** Az auth-gated probe login-adatai/tokenjei sosem hardcode-oltak es
+  sosem kerulnek promptba/PR-be — a `.ai-os/ui.json` env-referenciat tartalmaz,
+  a titok a szokasos `.env`-bol (gitignore-olt) jon, and the `sensitive_files` guard
   figyeli.
-- **Screenshotok.** A PR-be tett képek tartalmazhatnak érzékeny UI-t; a HITL-
-  reviewer dönt a megosztásról (nem publikáljuk automatikusan).
+- **Screenshotok.** A PR-be tett kepek tartalmazhatnak erzekeny UI-t; a HITL-
+  reviewer dont a megosztasrol (nem publikaljuk automatikusan).
 
 ---
 
-## 10. Integráció a meglévő flow-ba
+## 10. Integracio a meglevo flow-ba
 
-- **Új CLI:** `ai-os ui-debug <project> --report "a Mentés gomb nem működik"
+- **Uj CLI:** `ai-os ui-debug <project> --report "a Mentes gomb nem mukodik"
   [--url http://localhost:5173] [--merge-to-main]`. Lefut a collector →
-  triage → fix → sandbox → PR pipeline, a szokásos HITL plan-review kapuval és
+  triage → fix → sandbox → PR pipeline, a szokasos HITL plan-review kapuval es
   observability-eventekkel (`on_event`).
-- **Epic-taskként is:** egy UI-hibajavítás beilleszthető egy nagyobb epicbe mint
-  egy `ui`-típusú task (a `resolve_task_language` mintájára a task „ui" profilt
-  kap). Így egy „javítsd a checkout flow-t" epic vegyíthet backend + UI taskokat.
-- **`.ai-os/ui.json`** (repo-side config, a `sandbox.json` testvére): a preview
-  indítása (`dev_command`/`build_command`/`url`), a „ready" jel, opcionális
-  auth-előkészítő, és a reprodukciós alap-lépések.
+- **Epic-taskkent is:** egy UI-hibajavitas beillesztheto egy nagyobb epicbe mint
+  egy `ui`-tipusu task (a `resolve_task_language` mintajara a task „ui" profilt
+  kap). Igy egy „javitsd a checkout flow-t" epic vegyithet backend + UI taskokat.
+- **`.ai-os/ui.json`** (repo-side config, a `sandbox.json` testvere): a preview
+  inditasa (`dev_command`/`build_command`/`url`), a „ready" jel, opcionalis
+  auth-elokeszito, and the reprodukcios alap-lepesek.
 
 ---
 
-## 11. Determinisztikus vs LLM felelősségi mátrix
+## 11. Determinisztikus vs LLM felelossegi matrix
 
-| Feladat | Ki csinálja |
+| Feladat | Ki csinalja |
 | ------- | ----------- |
-| HTML/CSS/JS parse, UI-gráf építés | **determinisztikus** (Tree-sitter + Phase 1) |
-| Futásidejű mérés (láthatóság, listener, kattintás-hatás) | **determinisztikus** (Playwright) |
-| Gyanús minták jelölése + rangsor | **determinisztikus** (detektorok) |
-| Nagy dump átolvasása → gyökérok-hipotézis | **olcsó modell** (triage) |
-| A tényleges kódjavítás | **drága modell** (fix) |
-| A javítás igazolása | **determinisztikus** (Playwright sandbox) |
-| Merge-döntés | **ember** (HITL / PR review) |
+| HTML/CSS/JS parse, UI-graf epites | **determinisztikus** (Tree-sitter + Phase 1) |
+| Futasideju meres (lathatosag, listener, kattintas-hatas) | **determinisztikus** (Playwright) |
+| Gyanus mintak jelolese + rangsor | **determinisztikus** (detektorok) |
+| Nagy dump atolvasasa → gyokerok-hipotezis | **olcso modell** (triage) |
+| A tenyleges kodjavitas | **draga modell** (fix) |
+| A javitas igazolasa | **determinisztikus** (Playwright sandbox) |
+| Merge-dontes | **ember** (HITL / PR review) |
 
 ---
 
-## 12. Tervezett modul-térkép (`ai_os/ui/`)
+## 12. Tervezett modul-terkep (`ai_os/ui/`)
 
 ```
 ai_os/ui/
-  static_graph.py     # HTML/CSS/JS → UI Knowledge Graph (Phase 1-re építve)
-  playwright_probe.py # headless futásidejű mérés → InteractionReport
-  runtime_capture.py  # console/network/CSP gyűjtés
-  detectors.py        # determinisztikus gyanú-heurisztikák + rangsor
-  ui_graph.py         # a UI-gráf séma + build_ui_context_cache (tömörítés)
-  ui_config.py        # .ai-os/ui.json betöltés/validálás
+  static_graph.py     # HTML/CSS/JS → UI Knowledge Graph (Phase 1-re epitve)
+  playwright_probe.py # headless futasideju meres → InteractionReport
+  runtime_capture.py  # console/network/CSP gyujtes
+  detectors.py        # determinisztikus gyanu-heurisztikak + rangsor
+  ui_graph.py         # a UI-graf sema + build_ui_context_cache (tomorites)
+  ui_config.py        # .ai-os/ui.json betoltes/validalas
   mcp_tools.py        # ui_scan / ui_list_interactive / ui_probe_element / ui_reproduce
 ```
 
 CLI: `ai-os ui-debug` a `cli.py`-ban; sandbox: Playwright-profil a
-`container_runner.py`-ban (image override már van).
+`container_runner.py`-ban (image override mar van).
 
 ---
 
-## 13. Ismert korlátok és trade-offök (nem elhallgatva)
+## 13. Ismert korlatok es trade-offok (nem elhallgatva)
 
-- **Futó előnézet kell.** A dinamikus probe-hoz buildelhető/indítható oldal kell
-  (dev-server vagy statikus build). Tisztán statikus HTML-nél triviális; komplex
-  monorepónál a `.ai-os/ui.json` build-parancsára támaszkodunk.
-- **Nem-determinisztikus oldalak.** Animációk, időzítők, véletlen adat → a probe
-  `networkidle` + explicit ready-jel + reload-per-elem stratégiával stabilizál,
-  de a teljes determinizmus nem garantált minden SPA-ra. A több forrás (statikus
-  + dinamikus) redundanciája ezt csökkenti.
-- **Framework-handler statikus felismerés** részleges — a dinamikus mérés
-  kompenzál (4.4).
-- **Vizuális/pixel-szintű bugok** (elcsúszott layout, rossz szín) ezen a
-  toolchain-en kívül esnek — az egy jövőbeli *visual regression* kiterjesztés
-  (14.), nem ez a modul.
+- **Futo elonezet kell.** A dinamikus probe-hoz buildelheto/indithato oldal kell
+  (dev-server vagy statikus build). Tisztan statikus HTML-nel trivialis; komplex
+  monoreponal a `.ai-os/ui.json` build-parancsara tamaszkodunk.
+- **Nem-determinisztikus oldalak.** Animaciok, idozitok, veletlen adat → a probe
+  `networkidle` + explicit ready-jel + reload-per-elem strategiaval stabilizal,
+  de a teljes determinizmus nem garantalt minden SPA-ra. A tobb forras (statikus
+  + dinamikus) redundanciaja ezt csokkenti.
+- **Framework-handler statikus felismeres** reszleges — a dinamikus meres
+  kompenzal (4.4).
+- **Vizualis/pixel-szintu bugok** (elcsuszott layout, rossz szin) ezen a
+  toolchain-en kivul esnek — az egy jovobeli *visual regression* kiterjesztes
+  (14.), nem This module.
 
 ---
 
-## 14. Jövőbeli kiterjesztések
+## 14. Jovobeli kiterjesztesek
 
-- **Visual regression** — screenshot-diff a javítás előtt/után (pixelmatch),
-  layout-eltolódás (CLS) mérés.
-- **Akadálymentességi audit** — teljes a11y-fa ellenőrzés (axe-core) beépítése a
-  detektorok közé.
+- **Visual regression** — screenshot-diff a javitas elott/utan (pixelmatch),
+  layout-eltolodas (CLS) meres.
+- **Akadalymentessegi audit** — teljes a11y-fa ellenorzes (axe-core) beepitese a
+  detektorok koze.
 - **Cross-browser probe** — Firefox/WebKit is a Playwrighttal.
-- **Teljesítmény** — a Cloudflare `web-perf` mintájú Core Web Vitals mérés a
+- **Teljesitmeny** — a Cloudflare `web-perf` mintaju Core Web Vitals meres a
   probe-ba.
-- **„Record" mód** — a felhasználó egyszer végigkattintja a hibás flow-t, abból
-  determinisztikus reprodukciós szkript generálódik.
+- **„Record" mod** — a felhasznalo egyszer vegigkattintja a hibas flow-t, abbol
+  determinisztikus reprodukcios szkript generalodik.
 
 ---
 
-## Kapcsolódó dokumentumok
+## Kapcsolodo dokumentumok
 
-- `03_POLYGLOT_ANALYZER.md` — a HTML/CSS/JS parse-réteg, amire a static graph épül.
+- `03_POLYGLOT_ANALYZER.md` — a HTML/CSS/JS parse-reteg, amire a static graph epul.
 - `08_KNOWLEDGE_GRAPH_AND_SUBGRAPH_EXTRACTION.md` — a k-hop / context-cache minta,
-  amit a `build_ui_context_cache` UI-ra általánosít.
+  amit a `build_ui_context_cache` UI-ra altalanosit.
 - `10_EPHEMERAL_CONTAINER_SANDBOX_SPEC.md` — a sandbox, amiben a Playwright-
-  validáció fut (image override).
-- `20_STARTUP_GENERATOR.md` — a statikus-oldal generátor, ami ugyanezt a
-  Playwright-réteget használja smoke-tesztre.
+  validacio fut (image override).
+- `20_STARTUP_GENERATOR.md` — a statikus-oldal generator, ami ugyanezt a
+  Playwright-reteget hasznalja smoke-tesztre.
 ```

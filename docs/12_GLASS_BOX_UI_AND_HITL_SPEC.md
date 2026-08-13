@@ -1,12 +1,12 @@
 # 12. Glass Box UI & Interactive HITL Workflow Spec
 
-Ez a dokumentum az **AI-OS Glass Box UI** és a **Human-In-The-Loop (HITL) Interaktív Vezérlő felület** teljességgel részletezett specifikációja. Kidolgozza a valós idejű megfigyelhetőséget, az Epic/DAG feladatbontás fejlesztői jóváhagyási lépését (Planning Approval), a menet közbeni közbeszólást (Preemption), valamint a Monaco Editorral integrált kézi hibajavítási munkafolyamatot.
+This document is the **AI-OS Glass Box UI** and the **Human-In-The-Loop (HITL) Interaktiv Vezerlo felulet** teljesseggel reszletezett specifikacioja. Kidolgozza a valos ideju megfigyelhetoseget, az Epic/DAG feladatbontas fejlesztoi jovahagyasi lepeset (Planning Approval), a menet kozbeni kozbeszolast (Preemption), as well as a Monaco Editorral integralt kezi hibajavitasi munkafolyamatot.
 
 ---
 
-## 1. Architektúra és UI Komponens-Szerkezet
+## 1. Architektura es UI Komponens-Szerkezet
 
-A Glass Box UI egy **React 18 + TypeScript + Vite + TailwindCSS + React Flow + Monaco Editor** alapú webes felület, amely WebSockets-en keresztül kommunikál az Orchestrator FastAPI háttérrendszerével.
+A Glass Box UI egy **React 18 + TypeScript + Vite + TailwindCSS + React Flow + Monaco Editor** alapu webes felulet, amely WebSockets-en keresztul kommunikal az Orchestrator FastAPI hatterrendszerevel.
 
 ```mermaid
 graph TD
@@ -29,94 +29,94 @@ graph TD
 
 ---
 
-## 2. A 3-Lépcsős Human-In-The-Loop (HITL) Munkafolyamat
+## 2. A 3-Lepcsos Human-In-The-Loop (HITL) Munkafolyamat
 
-Az AI-OS nem fut vakon. A fejlesztő (Human) a teljes folyamat felett rendelkező kontrollal bír az alábbi 3 szinten:
+Az AI-OS nem fut vakon. A fejleszto (Human) a teljes folyamat felett rendelkezo kontrollal bir az alabbi 3 szinten:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PromptSubmitted: Fejlesztő beírja az Epic kérést
+    [*] --> PromptSubmitted: Fejleszto beirja az Epic kerest
     PromptSubmitted --> PlanningDAG: LLM DAG Planner felbontja a feladatot
     
     state HITL_Stage1_PlanReview {
-        PlanningDAG --> WaitingForPlanApproval: PLAN_REVIEW állapot (PAUSED)
-        WaitingForPlanApproval --> PlanApproved: Fejlesztő Jóváhagyja / Módosítja
-        WaitingForPlanApproval --> PlanningDAG: Fejlesztő Újratervezést Kér (Feedback)
+        PlanningDAG --> WaitingForPlanApproval: PLAN_REVIEW allapot (PAUSED)
+        WaitingForPlanApproval --> PlanApproved: Fejleszto Jovahagyja / Modositja
+        WaitingForPlanApproval --> PlanningDAG: Fejleszto Ujratervezest Ker (Feedback)
     }
 
-    PlanApproved --> ExecutingDAG: Orchestrator elindítja az ágenseket
+    PlanApproved --> ExecutingDAG: Orchestrator elinditja az agenseket
     
     state HITL_Stage2_RuntimePreemption {
-        ExecutingDAG --> RuntimePaused: Fejlesztő rákattint: "Közbeszólás / Pause"
-        RuntimePaused --> ExecutingDAG: Fejlesztő Folytatja (Resume)
+        ExecutingDAG --> RuntimePaused: Fejleszto rakattint: "Kozbeszolas / Pause"
+        RuntimePaused --> ExecutingDAG: Fejleszto Folytatja (Resume)
     }
 
-    ExecutingDAG --> ValidationFailed: Konténeres Teszt Sikertelen (Retry >= 3)
+    ExecutingDAG --> ValidationFailed: Konteneres Teszt Sikertelen (Retry >= 3)
 
     state HITL_Stage3_PreemptionRecovery {
-        ValidationFailed --> HITL_Required: TASK_BLOCKED állapot
-        HITL_Required --> ExecutingDAG: Opció A: Instrukció adása & Retry
-        HITL_Required --> ExecutingDAG: Opció B: Kézi Kódmódosítás (Monaco) & Resume
-        HITL_Required --> Cancelled: Opció C: Feladat Átugrása / Abort
+        ValidationFailed --> HITL_Required: TASK_BLOCKED allapot
+        HITL_Required --> ExecutingDAG: Opcio A: Instrukcio adasa & Retry
+        HITL_Required --> ExecutingDAG: Opcio B: Kezi Kodmodositas (Monaco) & Resume
+        HITL_Required --> Cancelled: Opcio C: Feladat Atugrasa / Abort
     }
 ```
 
 ---
 
-### 2.1. HITL Stage 1: DAG Tervezet Jóváhagyás & Szerkesztés (Plan Review)
+### 2.1. HITL Stage 1: DAG Tervezet Jovahagyas & Szerkesztes (Plan Review)
 
-Amikor a fejlesztő megad egy kérést (pl. *"Készíts JWT alapú autentikációt"*):
-1. A DAG Planner előállítja a feladatbontás tervezetét (Epicek, Taskok, függőségek, várható `write_set` fájlok).
-2. **A rendszer automatikusan megáll (`PLAN_REVIEW` állapot)**.
-3. A Glass Box UI megjeleníti az interaktív gráfnézetet és feladattáblázatot, ahol a fejlesztő:
-   - **Módosíthatja a függőségi éleket** (drag-and-drop a React Flow vásznon).
-   - **Szerkesztheti a feladatok adatait** (Cím, Leírás, Érintett fájlok, Kockázati szint).
-   - **Új feladatot adhat hozzá vagy törölhet**.
-   - Gombok: **"DAG Jóváhagyása & Indítás"** vagy **"Újratervezés Kérése Instrukcióval"**.
-
----
-
-### 2.2. HITL Stage 2: Menet Közbeni Közbeszólás (Runtime Preemption)
-
-A fejlesztő bármikor, a végrehajtás kellős közepén rákattinthat a **"PAUSE / KÖZBESZÓLÁS"** gombra:
-- Az Orchestrator befejezi a folyamatban lévő atomi műveleteket, majd felfüggeszti a DAG ütemezőt.
-- A fejlesztő megvizsgálhatja az aktív Git Worktree-ket, leállíthat egy nem megfelelően kódoló ágenst, vagy módosíthatja a zárolásokat.
-- Gomb: **"Folytatás (Resume)"**.
+Amikor a fejleszto megad egy kerest (pl. *"Keszits JWT alapu autentikaciot"*):
+1. A DAG Planner eloallitja a feladatbontas tervezetet (Epicek, Taskok, fuggosegek, varhato `write_set` fajlok).
+2. **A rendszer automatikusan megall (`PLAN_REVIEW` allapot)**.
+3. A Glass Box UI megjeleniti az interaktiv grafnezetet es feladattablazatot, ahol a fejleszto:
+   - **Modosithatja a fuggosegi eleket** (drag-and-drop a React Flow vasznon).
+   - **Szerkesztheti a feladatok adatait** (Cim, Leiras, Erintett fajlok, Kockazati szint).
+   - **Uj feladatot adhat hozza vagy torolhet**.
+   - Gombok: **"DAG Jovahagyasa & Inditas"** vagy **"Ujratervezes Kerese Instrukcioval"**.
 
 ---
 
-### 2.3. HITL Stage 3: Hibás Feladat Feloldása (Preemption Recovery)
+### 2.2. HITL Stage 2: Menet Kozbeni Kozbeszolas (Runtime Preemption)
 
-Ha egy ágens 3 egymást követő alkalommal is elhasal a Docker konténeres validáción:
-- A feladat **piros szegéllyel `HITL_REQUIRED` állapotba kerül**.
-- A jobb oldali felugró panelen (HITL Drawer) a fejlesztőnek **3 cselekvési lehetősége van**:
-
-#### Opció A: "Instrukció adása & Retry"
-A fejlesztő beír egy szöveges útmutatást az ágensnek (pl. *"Ne hozz létre új osztályt, használd a meglévő HelperService.ts static metódusát!"*), és rákattint az **"Újrapróbálkozás"** gombra.
-
-#### Opció B: "Kézi Kódmódosítás (Monaco Editor) & Resume"
-A UI megnyitja a beépített **Monaco Editor-t (VS Code szerkesztő élmény)** közvetlenül az ágens Git Worktree-jében lévő fájlra!
-- A fejlesztő kijavítja a hibát a böngészőben.
-- Rákattint a **"Konténeres Teszt Futtatása a UI-ról"** gombra.
-- Ha a teszt zöld, a **"Jóváhagyás & Folytatás"** gombbal felülbírálja az ágenst, és a DAG halad tovább!
-
-#### Opció C: "Feladat Átugrása (Skip) vagy Abort"
-A feladat megjelölése átugrottként, vagy a teljes Epic leállítása.
+A fejleszto barmikor, a vegrehajtas kellos kozepen rakattinthat a **"PAUSE / KOZBESZOLAS"** gombra:
+- Az Orchestrator befejezi a folyamatban levo atomi muveleteket, majd felfuggeszti a DAG utemezot.
+- A fejleszto megvizsgalhatja az aktiv Git Worktree-ket, leallithat egy nem megfeleloen kodolo agenst, vagy modosithatja a zarolasokat.
+- Gomb: **"Folytatas (Resume)"**.
 
 ---
 
-## 3. Valós Idejű Megfigyelhetőség (Glass Box Console)
+### 2.3. HITL Stage 3: Hibas Feladat Feloldasa (Preemption Recovery)
 
-A Glass Box UI garantálja, hogy a fejlesztő minden pillanatban pontosan látja:
+Ha egy agens 3 egymast koveto alkalommal is elhasal a Docker konteneres validacion:
+- A feladat **piros szegellyel `HITL_REQUIRED` allapotba kerul**.
+- A jobb oldali felugro panelen (HITL Drawer) a fejlesztonek **3 cselekvesi lehetosege van**:
 
-1. **Modell Kiosztás és Költségek**:
+#### Opcio A: "Instrukcio adasa & Retry"
+A fejleszto beir egy szoveges utmutatast az agensnek (pl. *"Ne hozz letre uj osztalyt, hasznald a meglevo HelperService.ts static metodusat!"*), es rakattint az **"Ujraprobalkozas"** gombra.
+
+#### Opcio B: "Kezi Kodmodositas (Monaco Editor) & Resume"
+A UI megnyitja a beepitett **Monaco Editor-t (VS Code szerkeszto elmeny)** kozvetlenul az agens Git Worktree-jeben levo fajlra!
+- A fejleszto kijavitja a hibat a bongeszoben.
+- Rakattint a **"Konteneres Teszt Futtatasa a UI-rol"** gombra.
+- Ha a teszt zold, a **"Jovahagyas & Folytatas"** gombbal felulbiralja az agenst, and the DAG halad tovabb!
+
+#### Opcio C: "Feladat Atugrasa (Skip) vagy Abort"
+A feladat megjelolese atugrottkent, vagy a teljes Epic leallitasa.
+
+---
+
+## 3. Valos Ideju Megfigyelhetoseg (Glass Box Console)
+
+A Glass Box UI garantalja, that the fejleszto minden pillanatban pontosan latja:
+
+1. **Modell Kiosztas es Koltsegek**:
    - `TASK-101`: **Claude 3.5 Sonnet** (High Risk) ➔ *$0.042 / 14,200 tokens*
    - `TASK-102`: **Gemini 1.5 Flash** (Low Risk) ➔ *$0.001 / 8,100 tokens*
-2. **Élő Log és Prompt Stream**:
-   - Lásd az ágensnek elküldött tömörített *Context Cache*-t.
-   - Lásd az ágens által kibocsátott MCP Tool hívásokat (`propose_file_patch`).
-   - Lásd a Git Worktree valós idejű `git diff` nézetét (piros/zöld kódváltozások).
-   - Lásd a Docker konténer tesztkimenetét (stdout/stderr).
+2. **Elo Log es Prompt Stream**:
+   - Lasd az agensnek elkuldott tomoritett *Context Cache*-t.
+   - Lasd az agens altal kibocsatott MCP Tool hivasokat (`propose_file_patch`).
+   - Lasd a Git Worktree valos ideju `git diff` nezetet (piros/zold kodvaltozasok).
+   - Lasd a Docker kontener tesztkimenetet (stdout/stderr).
 
 ---
 
@@ -133,7 +133,7 @@ export const GlassBoxDashboard: React.FC = () => {
 
   return (
     <div className="flex h-screen w-screen bg-slate-950 text-slate-100 font-sans">
-      {/* 1. KÖLTSÉG ÉS ÁLLAPOT SÁV */}
+      {/* 1. KOLTSEG ES ALLAPOT SAV */}
       <header className="absolute top-0 left-0 right-0 h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 z-10">
         <div className="flex items-center space-x-4">
           <span className="text-xl font-bold text-cyan-400">AI-OS Glass Box</span>
@@ -148,9 +148,9 @@ export const GlassBoxDashboard: React.FC = () => {
         </div>
       </header>
 
-      {/* 2. FŐ MUNKATERÜLET (DAG GRAPH + LIVE LOGS) */}
+      {/* 2. FO MUNKATERULET (DAG GRAPH + LIVE LOGS) */}
       <div className="flex flex-1 pt-14 w-full h-full">
-        {/* Bal oldali DAG vászon */}
+        {/* Bal oldali DAG vaszon */}
         <div className="w-1/2 h-full border-r border-slate-800 relative">
           <ReactFlow nodes={[]} edges={[]}>
             <Background color="#334155" gap={16} />

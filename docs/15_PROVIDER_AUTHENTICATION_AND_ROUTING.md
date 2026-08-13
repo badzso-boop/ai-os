@@ -1,19 +1,19 @@
 # 15. AI Provider Authentication & Native Session Transport Spec
 
-Ez a dokumentum az **AI-OS Modell Szolgáltatók Autentikációjának, az Ingyenes/Költséghatékony Modell Ütemezésnek és a Beépített Web/OAuth Session Transport-nak** a részletes specifikációja.
+This document is the **AI-OS Modell Szolgaltatok Autentikaciojanak, az Ingyenes/Koltseghatekony Modell Utemezesnek and the Beepitett Web/OAuth Session Transport-nak** a reszletes specifikacioja.
 
 ---
 
-## 1. Kettős Autentikációs Architektúra (Dual Authentication Modes)
+## 1. Kettos Autentikacios Architektura (Dual Authentication Modes)
 
-Az AI-OS MCP adapterei (`ai_os/mcp/adapters/`) két teljesen egyenértékű, beépített autentikációs módot támogatnak **bármilyen külső proxy szoftver futtatása nélkül** mindhárom nagy szolgáltatóhoz (Anthropic Claude, OpenAI ChatGPT, Google Gemini):
+Az AI-OS MCP adapterei (`ai_os/mcp/adapters/`) ket teljesen egyenerteku, beepitett autentikacios modot tamogatnak **barmilyen kulso proxy szoftver futtatasa nelkul** mindharom nagy szolgaltatohoz (Anthropic Claude, OpenAI ChatGPT, Google Gemini):
 
 ```mermaid
 graph TD
     Router[AI-OS Protocol Router] --> Adapter[Unified MCP Provider Adapters]
     
     subgraph Native Python Transport (httpx.AsyncClient)
-        Adapter --> AuthCheck{Autentikáció Típusa?}
+        Adapter --> AuthCheck{Autentikacio Tipusa?}
         
         AuthCheck -->|1. Developer API Key| DevKeyMode[Standard Developer API Mode]
         AuthCheck -->|2. OAuth / Session Token| SessionMode[Native Web Session / OAuth Mode]
@@ -28,9 +28,9 @@ graph TD
 
 ---
 
-## 2. Szolgáltatónkénti Támogatási Mátrix
+## 2. Szolgaltatonkenti Tamogatasi Matrix
 
-| Szolgáltató | 1. Developer API Key Mód | 2. Native Web Session / OAuth Mód |
+| Szolgaltato | 1. Developer API Key Mod | 2. Native Web Session / OAuth Mod |
 | :--- | :--- | :--- |
 | **Anthropic Claude** | `api.anthropic.com` (`x-api-key`) | `claude.ai` (`sessionKey` / OAuth token) |
 | **OpenAI ChatGPT** | `api.openai.com` (`Authorization: Bearer sk-...`) | `chatgpt.com` (`accessToken` - ChatGPT Plus) |
@@ -38,7 +38,7 @@ graph TD
 
 ---
 
-## 3. Minta `.env` Konfiguráció
+## 3. Minta `.env` Konfiguracio
 
 ```env
 # ==============================================================================
@@ -64,7 +64,7 @@ OLLAMA_ENDPOINT="http://localhost:11434"
 
 ---
 
-## 4. Python Implementációs Blueprintek (`ai_os/mcp/adapters/`)
+## 4. Python Implementacios Blueprintek (`ai_os/mcp/adapters/`)
 
 ### 4.1. OpenAI / ChatGPT Plus Adapter (`ai_os/mcp/adapters/openai_adapter.py`)
 
@@ -85,10 +85,10 @@ class NativeOpenAIMCPAdapter(BaseMCPAdapter):
         elif self.api_key:
             return await self._execute_developer_api(request)
         else:
-            raise ValueError("Hiányzik az OpenAI API kulcs vagy a ChatGPT Plus Session Token!")
+            raise ValueError("Hianyzik az OpenAI API kulcs vagy a ChatGPT Plus Session Token!")
 
     async def _execute_developer_api(self, request: LLMTaskRequest) -> LLMTaskResponse:
-        """Hivatalos Developer API kérés."""
+        """Hivatalos Developer API keres."""
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         payload = {
@@ -110,7 +110,7 @@ class NativeOpenAIMCPAdapter(BaseMCPAdapter):
         )
 
     async def _execute_chatgpt_plus_session(self, request: LLMTaskRequest) -> LLMTaskResponse:
-        """Native ChatGPT Plus Web Session (accessToken) hívás külső proxy NÉLKÜL."""
+        """Native ChatGPT Plus Web Session (accessToken) hivas kulso proxy NELKUL."""
         url = "https://chatgpt.com/backend-api/conversation"
         headers = {
             "Authorization": f"Bearer {self.session_token}",
@@ -154,10 +154,10 @@ class NativeGeminiMCPAdapter(BaseMCPAdapter):
         elif self.session_cookie:
             return await self._execute_gemini_web_session(request)
         else:
-            raise ValueError("Hiányzik a Gemini API kulcs vagy a Session Cookie!")
+            raise ValueError("Hianyzik a Gemini API kulcs vagy a Session Cookie!")
 
     async def _execute_ai_studio_api(self, request: LLMTaskRequest) -> LLMTaskResponse:
-        """Hivatalos Ingyenes Google AI Studio API hívás."""
+        """Hivatalos Ingyenes Google AI Studio API hivas."""
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
         payload = {
             "contents": [{"parts": [{"text": f"{request.system_prompt}\n\n{request.context_payload}"}]}]
@@ -175,7 +175,7 @@ class NativeGeminiMCPAdapter(BaseMCPAdapter):
         )
 
     async def _execute_gemini_web_session(self, request: LLMTaskRequest) -> LLMTaskResponse:
-        """Native Gemini Web Session hívás cookie-val."""
+        """Native Gemini Web Session hivas cookie-val."""
         url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
         headers = {"Cookie": self.session_cookie}
         # Web session payload formatting

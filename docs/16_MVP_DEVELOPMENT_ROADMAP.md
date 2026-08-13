@@ -1,97 +1,97 @@
 # 16. AI-OS MVP Development Roadmap & Testing Plan
 
-Ez a dokumentum az **AI-OS 4-Fázisú Fejlesztési Ütemtervének (MVP Roadmap)** és Tesztelési Stratégiájának részletes specifikációja.
+This document is the **AI-OS 4-Fazisu Fejlesztesi Utemtervenek (MVP Roadmap)** es Tesztelesi Strategiajanak reszletes specifikacioja.
 
 ---
 
-## 🗺️ Mérföldkő Mátrix (Phase Overview)
+## 🗺️ Merfoldko Matrix (Phase Overview)
 
 ```mermaid
 graph LR
-    P1[1. Fázis: Polyglot Analyzer & Knowledge Graph] --> P2[2. Fázis: Orchestrator Core & Git Engine]
-    P2 --> P3[3. Fázis: MCP Router & Ephemeral Sandbox]
-    P3 --> P4[4. Fázis: Glass Box Web UI & HITL]
+    P1[1. Fazis: Polyglot Analyzer & Knowledge Graph] --> P2[2. Fazis: Orchestrator Core & Git Engine]
+    P2 --> P3[3. Fazis: MCP Router & Ephemeral Sandbox]
+    P3 --> P4[4. Fazis: Glass Box Web UI & HITL]
 ```
 
 ---
 
-## 📌 1. Fázis: Determinisztikus Alapok (Polyglot Analyzer & Knowledge Graph)
+## 📌 1. Fazis: Determinisztikus Alapok (Polyglot Analyzer & Knowledge Graph)
 
-> **Fókusz**: AI tokenek elégetése nélküli kódbázis-értelmezés, szimbólum kinyerés és kontextus-tömörítés.
+> **Fokusz**: AI tokenek elegetese nelkuli kodbazis-ertelmezes, szimbolum kinyeres es kontextus-tomorites.
 
-### Megvalósítandó Modulok:
+### Megvalositando Modulok:
 - **`ai_os/analyzer/tree_sitter_engine.py`**:
-  - Tree-sitter parserek beállítása (JavaScript/TypeScript, Python, Java, HTML, CSS, SQL).
-  - Szimbólumok (osztályok, függvények, típusok) kinyerése kezdő/záró sorszámokkal.
+  - Tree-sitter parserek beallitasa (JavaScript/TypeScript, Python, Java, HTML, CSS, SQL).
+  - Szimbolumok (osztalyok, fuggvenyek, tipusok) kinyerese kezdo/zaro sorszamokkal.
 - **`ai_os/analyzer/call_graph_builder.py`**:
-  - Fájlok közötti statikus `IMPORTS` és függvény-szintű `CALLS` függőségi gráf építés.
+  - Fajlok kozotti statikus `IMPORTS` es fuggveny-szintu `CALLS` fuggosegi graf epites.
 - **`ai_os/knowledge/graph_engine.py`**:
-  - `NetworkX` irányított multi-gráf inicializálása.
-  - $k$-hop szomszédsági bejárási algoritmus ($k=2$).
+  - `NetworkX` iranyitott multi-graf inicializalasa.
+  - $k$-hop szomszedsagi bejarasi algoritmus ($k=2$).
 - **`ai_os/knowledge/skeleton_extractor.py`**:
-  - Függvénytörzsek kiejtése, vázlatos interfész stub-ok generálása.
+  - Fuggvenytorzsek kiejtese, vazlatos interfesz stub-ok generalasa.
 
-### 🧪 1. Fázis Tesztelési Kritériumok (Acceptance Tests):
-- [x] Egy 100 fájlból álló mintaprojekt Tree-sitter beolvasása kevesebb mint 1 másodperc alatt.
-- [x] A $k$-hop subgraph kinyerő 80-90%-os token-megtakarítást ér el a nyers fájlokhoz képest.
+### 🧪 1. Fazis Tesztelesi Kriteriumok (Acceptance Tests):
+- [x] Egy 100 fajlbol allo mintaprojekt Tree-sitter beolvasasa kevesebb mint 1 masodperc alatt.
+- [x] A $k$-hop subgraph kinyero 80-90%-os token-megtakaritast er el a nyers fajlokhoz kepest.
 
 ---
 
-## 📌 2. Fázis: Rendszermag, Zárolás és Git Izoláció (Orchestrator Core & Git Engine)
+## 📌 2. Fazis: Rendszermag, Zarolas es Git Izolacio (Orchestrator Core & Git Engine)
 
-> **Fókusz**: Párhuzamos feladat-végrehajtás, adatkonfliktus-mentesség és adatbázis perzisztencia.
+> **Fokusz**: Parhuzamos feladat-vegrehajtas, adatkonfliktus-mentesseg es adatbazis perzisztencia.
 
-### Megvalósítandó Modulok:
+### Megvalositando Modulok:
 - **`ai_os/core/lock_manager.py`**:
-  - Aszinkron `LockManager` megírása (`read_set` megosztott zárolás, `write_set` kizárólagos zárolás).
+  - Aszinkron `LockManager` megirasa (`read_set` megosztott zarolas, `write_set` kizarolagos zarolas).
 - **`ai_os/core/staging.py`**:
-  - `GitStagingEngine` megírása (izolált Worktree mappák kreálása `.ai-os/worktrees/TASK-ID`, `git merge-tree`, rebase staging).
+  - `GitStagingEngine` megirasa (izolalt Worktree mappak krealasa `.ai-os/worktrees/TASK-ID`, `git merge-tree`, rebase staging).
 - **`ai_os/core/db/`**:
-  - SQLite 3 (WAL Mode) adatbázis kapcsolat (`aiosqlite` + SQLAlchemy 2.0 Async).
-  - `EpicModel`, `TaskModel`, `LockAuditModel`, `TokenCostModel` migrálása.
+  - SQLite 3 (WAL Mode) adatbazis kapcsolat (`aiosqlite` + SQLAlchemy 2.0 Async).
+  - `EpicModel`, `TaskModel`, `LockAuditModel`, `TokenCostModel` migralasa.
 - **`ai_os/core/planner.py`**:
-  - DAG topológiai sorrendezés (`networkx.topological_sort`) és ciklusdetektálás.
+  - DAG topologiai sorrendezes (`networkx.topological_sort`) es ciklusdetektalas.
 
-### 🧪 2. Fázis Tesztelési Kritériumok:
-- [x] Két diszjunkt feladat (`Task A` és `Task B`) egyidejű lefutása külön Worktree-ben merge konfliktus nélkül.
-- [x] Két azonos fájlt módosítani kívánó feladat esetén a Lock Manager sorba rendezi a végrehajtást.
+### 🧪 2. Fazis Tesztelesi Kriteriumok:
+- [x] Ket diszjunkt feladat (`Task A` es `Task B`) egyideju lefutasa kulon Worktree-ben merge konfliktus nelkul.
+- [x] Ket azonos fajlt modositani kivano feladat in case of a Lock Manager sorba rendezi a vegrehajtast.
 
 ---
 
-## 📌 3. Fázis: MCP Engine & Eldobható Homokozó (MCP Router & Ephemeral Sandbox)
+## 📌 3. Fazis: MCP Engine & Eldobhato Homokozo (MCP Router & Ephemeral Sandbox)
 
-> **Fókusz**: AI modellek biztonságos integrációja és automata konténeres tesztelés.
+> **Fokusz**: AI modellek biztonsagos integracioja es automata konteneres teszteles.
 
-### Megvalósítandó Modulok:
+### Megvalositando Modulok:
 - **`ai_os/mcp/protocol_router.py`**:
-  - Kockázat- és költségalapú modellválasztási mátrix (`LOW` ➔ Gemini Flash, `HIGH` ➔ Claude Sonnet).
+  - Kockazat- es koltsegalapu modellvalasztasi matrix (`LOW` ➔ Gemini Flash, `HIGH` ➔ Claude Sonnet).
 - **`ai_os/mcp/adapters/`**:
-  - DUAL-AUTH támogatás: API Key VAGY Native Web/OAuth Session Transport (Anthropic, OpenAI ChatGPT Plus, Google Gemini Free Tier, OpenRouter, Ollama).
+  - DUAL-AUTH tamogatas: API Key VAGY Native Web/OAuth Session Transport (Anthropic, OpenAI ChatGPT Plus, Google Gemini Free Tier, OpenRouter, Ollama).
 - **`ai_os/sandbox/container_runner.py`**:
-  - `EphemeralSandboxRunner` megírása Docker SDK-val (`--net none`, `-v /worktree:/app:ro`, 2GB RAM limit).
+  - `EphemeralSandboxRunner` megirasa Docker SDK-val (`--net none`, `-v /worktree:/app:ro`, 2GB RAM limit).
 - **`ai_os/sandbox/log_parser.py`**:
-  - ANSI terminál kódok letisztítása és JSON feedback formázás az LLM számára.
+  - ANSI terminal kodok letisztitasa es JSON feedback formazas az LLM szamara.
 
-### 🧪 3. Fázis Tesztelési Kritériumok:
-- [x] Az ágens által generált kód nem tud kimenő hálózati kérést indítani a konténerből.
-- [x] Hibás kód esetén a konténer hibaüzenete alapján az ágens 2. próbálkozásra kijavítja a hibát.
+### 🧪 3. Fazis Tesztelesi Kriteriumok:
+- [x] Az agens altal generalt kod nem tud kimeno halozati kerest inditani a kontenerbol.
+- [x] Hibas kod in case of a kontener hibauzenete based on az agens 2. probalkozasra kijavitja a hibat.
 
 ---
 
-## 📌 4. Fázis: Glass Box Web UI és HITL Integráció (Vezérlő Felület & HITL)
+## 📌 4. Fazis: Glass Box Web UI es HITL Integracio (Vezerlo Felulet & HITL)
 
-> **Fókusz**: Valós idejű fejlesztői átláthatóság és interaktív jóváhagyási munkafolyamat.
+> **Fokusz**: Valos ideju fejlesztoi atlathatosag es interaktiv jovahagyasi munkafolyamat.
 
-### Megvalósítandó Modulok:
+### Megvalositando Modulok:
 - **`ai_os/main.py` & `ws_manager`**:
-  - FastAPI REST API végpontok és WebSocket szerver az élő log- és állapot-közvetítéshez (`/api/v1/ws/events`).
+  - FastAPI REST API vegpontok es WebSocket szerver az elo log- es allapot-kozvetiteshez (`/api/v1/ws/events`).
 - **`ui/src/components/DagCanvas.tsx`**:
-  - React Flow interaktív DAG feladat-gráf vizualizáció.
+  - React Flow interaktiv DAG feladat-graf vizualizacio.
 - **`ui/src/components/HitlDrawer.tsx`**:
-  - **Stage 1 Plan Review**: A DAG végrehajtás automatikus megállítása `PLAN_REVIEW` állapotban a fejlesztő jóváhagyásáig.
-  - **Stage 2 Runtime Preemption**: "Pause / Közbeszólás" gomb.
-  - **Stage 3 Monaco Editor**: Beépített VS Code kód-szerkesztő a felületen a sikertelen tesztek kézi javításához és felülbírálásához.
+  - **Stage 1 Plan Review**: A DAG vegrehajtas automatikus megallitasa `PLAN_REVIEW` allapotban a fejleszto jovahagyasaig.
+  - **Stage 2 Runtime Preemption**: "Pause / Kozbeszolas" gomb.
+  - **Stage 3 Monaco Editor**: Beepitett VS Code kod-szerkeszto a feluleten a sikertelen tesztek kezi javitasahoz es felulbiralasahoz.
 
-### 🧪 4. Fázis Tesztelési Kritériumok:
-- [x] Új Epic indításakor a felület megállítja a folyamatot, amíg a fejlesztő rákattint az "Approve & Execute DAG" gombra.
-- [x] Manuális kódmódosítás után a UI-ról futtatott teszt sikere esetén a DAG automatikusan folytatódik.
+### 🧪 4. Fazis Tesztelesi Kriteriumok:
+- [x] Uj Epic inditasakor a felulet megallitja a folyamatot, amig a fejleszto rakattint az "Approve & Execute DAG" gombra.
+- [x] Manualis kodmodositas utan a UI-rol futtatott teszt sikere in case of a DAG automatikusan folytatodik.

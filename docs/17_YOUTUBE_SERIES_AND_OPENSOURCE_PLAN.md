@@ -1,19 +1,19 @@
 # 17. Open-Source Launch & "Vibe Coding" YouTube Strategy
 
-Ez a dokumentum az **AI-OS Open-Source YouTube Videó-Sorozatának** frissített, "Faceless / Vibe Coding Devlog" formátumú forgatókönyve.
+This document is the **AI-OS Open-Source YouTube Video-Sorozatanak** frissitett, "Faceless / Vibe Coding Devlog" formatumu forgatokonyve.
 
 ---
 
-## 🎧 A Videó Stílus és Koncepció (Faceless Vibe Coding Devlog)
+## 🎧 A Video Stilus es Koncepcio (Faceless Vibe Coding Devlog)
 
-* **Nyelv**: **Angol (English)** – a nemzetközi fejlesztői közösség és a magasabb elérés érdekében.
-* **Formátum**: **Faceless (Arc nélküli)**, esztétikus képernyőfelvételekkel, letisztult terminal/IDE vizuális elemekkel.
-* **Módszertan**: **Vibe Coding / Prompt Engineering** – Nem manuálisan gépeljük a kódot karakterről karakterre, hanem az AI-OS-t magát is AI segítségével, magas szintű architektúra-promptolással építjük fel!
-* **Vágási Stílus**: Dinamikus vágások, gyorsított (1.5x - 2x) kódgenerálási idővonalak, lo-fi / synthwave háttérzene, tiszta angol hangalámondás (voiceover).
+* **Nyelv**: **Angol (English)** – a nemzetkozi fejlesztoi kozosseg and the magasabb eleres erdekeben.
+* **Formatum**: **Faceless (Arc nelkuli)**, esztetikus kepernyofelvetelekkel, letisztult terminal/IDE vizualis elemekkel.
+* **Modszertan**: **Vibe Coding / Prompt Engineering** – Nem manualisan gepeljuk a kodot karakterrol karakterre, hanem az AI-OS-t magat is AI segitsegevel, magas szintu architektura-promptolassal epitjuk fel!
+* **Vagasi Stilus**: Dinamikus vagasok, gyorsitott (1.5x - 2x) kodgeneralasi idovonalak, lo-fi / synthwave hatterzene, tiszta angol hangalamondas (voiceover).
 
 ---
 
-## 🎬 Epizód Terv & Vágási Forgatókönyv (English Episodes)
+## 🎬 Epizod Terv & Vagasi Forgatokonyv (English Episodes)
 
 ```mermaid
 graph TD
@@ -85,15 +85,15 @@ graph TD
 
 ---
 
-## 🎛️ Vágási & Képernyőfelvételi Beállítások (Production Guidelines)
+## 🎛️ Vagasi & Kepernyofelveteli Beallitasok (Production Guidelines)
 
-1. **Audio / Hangalámondás**:
-   - Angol nyelvű hangalámondás (Voiceover) felvétele utólag (Voiceover over Montage), vagy AI szinkronhang (pl. ElevenLabs) finomhangolva.
-   - Háttérzene: Copyright-free Lo-fi Chill Beats / Synthwave (pl. Epidemic Sound / Streambeats).
-2. **Képernyőfelvétel (OBS Studio)**:
-   - 1080p60 vagy 4K felbontás.
-   - Sötét téma (Tokyo Night / Catppuccin Macchiato).
-   - Növelt font méret az IDE-ben (18px), zoom effektusok a fontos kódrészletekre.
-3. **Vágóprogram (DaVinci Resolve / Premiere Pro)**:
-   - Gyorsított kódgenerálás (1.5x - 2x speedup).
-   - Finom átmenetek (Smooth Pan & Zoom, Sound Effects / Swoosh hangok a terminál kimeneteknél).
+1. **Audio / Hangalamondas**:
+   - Angol nyelvu hangalamondas (Voiceover) felvetele utolag (Voiceover over Montage), vagy AI szinkronhang (pl. ElevenLabs) finomhangolva.
+   - Hatterzene: Copyright-free Lo-fi Chill Beats / Synthwave (pl. Epidemic Sound / Streambeats).
+2. **Kepernyofelvetel (OBS Studio)**:
+   - 1080p60 vagy 4K felbontas.
+   - Sotet tema (Tokyo Night / Catppuccin Macchiato).
+   - Novelt font meret az IDE-ben (18px), zoom effektusok a fontos kodreszletekre.
+3. **Vagoprogram (DaVinci Resolve / Premiere Pro)**:
+   - Gyorsitott kodgeneralas (1.5x - 2x speedup).
+   - Finom atmenetek (Smooth Pan & Zoom, Sound Effects / Swoosh hangok a terminal kimeneteknel).
