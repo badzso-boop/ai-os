@@ -223,3 +223,27 @@ async def test_timeout_returns_result_and_leaves_no_lingering_container(worktree
             break
         time.sleep(1.0)
     assert _docker_ps_names(["-a"]) == []
+
+
+async def test_setup_commands_under_mount_isolation_combines_with_test_command(worktree):
+    """Under mount isolation (Python), setup_commands runs in the SAME container
+    as the test command, combined via && with the setup-done marker."""
+    import json
+    ai_os_dir = worktree / ".ai-os"
+    ai_os_dir.mkdir()
+    (ai_os_dir / "sandbox.json").write_text(json.dumps({
+        "setup_commands": ["echo 'setup_ran' > /tmp/setup.txt"],
+    }))
+    (worktree / "test_setup.py").write_text(
+        "import os\n"
+        "def test_setup_effect():\n"
+        "    assert os.path.exists('/tmp/setup.txt')\n"
+        "    with open('/tmp/setup.txt') as f:\n"
+        "        assert f.read().strip() == 'setup_ran'\n"
+    )
+    runner = EphemeralSandboxRunner(timeout_seconds=30.0)
+    result = await runner.run_validation(worktree, "python")
+
+    assert result.success is True, f"Expected setup_commands + pytest pass, got:\n{result.output}"
+    assert result.exit_code == 0
+

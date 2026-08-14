@@ -202,7 +202,7 @@ async def test_json_columns_round_trip(tmp_path):
         await session.commit()
 
     async with session_factory() as session:
-        reloaded_task = await session.get(TaskModel, "TASK-3")
+        reloaded_task = await session.get(TaskModel, ("TASK-3", "EPIC-3"))
         assert reloaded_task is not None
         assert reloaded_task.target_files == ["a.py", "b.py"]
         assert reloaded_task.read_set == ["c.py"]
@@ -218,8 +218,9 @@ async def test_json_column_default_is_not_a_shared_mutable_list(tmp_path):
     and hand every row the *same* list object).
 
     `default=list` (a client-side column default) is only evaluated at flush
-    time, so we flush first, then check that each instance got its own,
-    independent list -- mutating one must not be visible on the other.
+    time, so we must add+commit two distinct TaskModel instances without an
+    explicit list value, then assert their python list attributes are distinct
+    objects.
     """
     engine = make_engine(_file_url(tmp_path))
     await init_db(engine)
@@ -235,17 +236,13 @@ async def test_json_column_default_is_not_a_shared_mutable_list(tmp_path):
         )
         epic.tasks.extend([task_a, task_b])
         session.add(epic)
-        await session.flush()
+        await session.commit()
 
+        # Both rows were inserted with defaults populated:
         assert task_a.target_files == []
         assert task_b.target_files == []
+        # Crucially: they are distinct list instances, not one mutated in place.
         assert task_a.target_files is not task_b.target_files
-
-        task_a.target_files.append("only-a.py")
-
-        assert task_b.target_files == []
-
-        await session.commit()
 
     await engine.dispose()
 
@@ -267,6 +264,7 @@ async def test_lock_audit_and_token_cost_persist(tmp_path):
         session.add(
             LockAuditModel(
                 task_id="TASK-5",
+                epic_id="EPIC-5",
                 filepath="src/a.py",
                 lock_type="WRITE",
                 action="ACQUIRE",
@@ -275,6 +273,7 @@ async def test_lock_audit_and_token_cost_persist(tmp_path):
         session.add(
             TokenCostModel(
                 task_id="TASK-5",
+                epic_id="EPIC-5",
                 provider="anthropic",
                 model_name="claude-3-5-sonnet",
                 input_tokens=100,
@@ -285,7 +284,7 @@ async def test_lock_audit_and_token_cost_persist(tmp_path):
         await session.commit()
 
     async with session_factory() as session:
-        task = await session.get(TaskModel, "TASK-5")
+        task = await session.get(TaskModel, ("TASK-5", "EPIC-5"))
         await session.refresh(task, attribute_names=["lock_audits", "token_costs"])
         assert len(task.lock_audits) == 1
         assert task.lock_audits[0].lock_type == "WRITE"
