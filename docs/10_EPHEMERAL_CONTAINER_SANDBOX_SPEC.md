@@ -1,6 +1,6 @@
 # 10. Ephemeral Container Sandbox & Security Spec
 
-This document is the **AI-OS Execution & Validation Sandbox** melyszintu biztonsagi es kontener-specification. Kidolgozza az eldobhato (ephemeral) Docker/Podman konteneres izolaciot, a biztonsagi szabalyzatokat, a nyelvi profilmatrixot, az ansi-log strukturalast, valamint a Python referencia-implementaciot.
+This document is the **AI-OS Execution & Validation Sandbox** melyszintu biztonsagi es kontener-specifikacioja. Kidolgozza az eldobhato (ephemeral) Docker/Podman konteneres izolaciot, a biztonsagi szabalyzatokat, a nyelvi profilmatrixot, az ansi-log strukturalast, as well as a Python referencia-implementaciot.
 
 ---
 
@@ -29,7 +29,7 @@ graph TD
 
 | Biztonsagi Korlat | Beallitas / Flag | Cel & Indoklas |
 | :--- | :--- | :--- |
-| **Halozati Izolacio** | `--net none` | Megakadalyozza, hogy a kod adatokat szivarogtasson ki az internetre. |
+| **Halozati Izolacio** | `--net none` | Megakadalyozza, that the kod adatokat szivarogtasson ki az internetre. |
 | **Fajlrendszer Vedelme** | `-v /worktree:/app:ro` | A gazdagep kodja **Read-Only** nezetben van felcsatolva. |
 | **Ideiglenes Iras** | `--tmpfs /tmp:rw,noexec` | A kontener csak a RAM-ban levo ideiglenes taroloba irhat. |
 | **Eroforras Korlatozas** | `--memory=2g --cpus=2.0` | Megakadalyozza a Denial of Service (DoS) es memoriatulcsordulasi tamadasokat. |
@@ -144,7 +144,7 @@ class EphemeralSandboxRunner:
             "mem_limit": "2g",       # Maximum 2GB RAM
             "nano_cpus": 2000000000, # Maximum 2.0 CPU mag
             "tmpfs": {"/tmp": "rw,noexec,nosuid,size=256m"},
-            "user": "1000:1000",     # Non-root user
+            "user": "1000:1000",     # Non-root felhasznalo
             "cap_drop": ["ALL"],     # Minden Linux capability torolve
             "detach": True
         }

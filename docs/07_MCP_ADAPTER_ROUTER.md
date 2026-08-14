@@ -1,6 +1,6 @@
 # 07. MCP Server & Orchestrator Engine Architecture
 
-This document is the **AI-OS Orchestrator Kernel** es az **MCP (Model Context Protocol) Adapter & Server Engine** megvalositasi szintu specification. Tartalmazza a determinisztikus rendszermag operation, az UML / Mermaid architektura-diagramokat, a pontos JSON-RPC MCP parancssemakat es a developmenthez szukseges Python kod-blueprintet.
+This document is the **AI-OS Orchestrator Kernel** and the **MCP (Model Context Protocol) Adapter & Server Engine** megvalositasi szintu specifikacioja. Tartalmazza a determinisztikus rendszermag operation, az UML / Mermaid architektura-diagramokat, a pontos JSON-RPC MCP parancssemakat and the fejleszteshez szukseges Python kod-blueprintet.
 
 ---
 
@@ -8,12 +8,12 @@ This document is the **AI-OS Orchestrator Kernel** es az **MCP (Model Context Pr
 
 Az AI-OS operation a szamitogepes operacios rendszerek (OS Kernel) mintajara epul:
 
-- **Orchestrator Core (Ring 0 - OS Kernel)**: **100%-ig determinisztikus Python 3.12+ algoritmus** (`asyncio`). Felelos az allapotgepekert, a fuggosegi grafokert (DAG), a fajlzarolasokert, az MCP szerver/kliens protokoll kommunikacioert es a Git Worktree / Docker sandbox felugyeleteert. **0 token koltsegu**, nem teveszt, nem hallucinal.
+- **Orchestrator Core (Ring 0 - OS Kernel)**: **100%-ig determinisztikus Python 3.12+ algoritmus** (`asyncio`). responsible az allapotgepekert, a fuggosegi grafokert (DAG), a fajlzarolasokert, az MCP szerver/kliens protokoll kommunikacioert and the Git Worktree / Docker sandbox felugyeleteert. **0 token koltsegu**, nem teveszt, nem hallucinal.
 - **AI Executing Cores (Ring 3 - User Space Processes)**: A felcserelheto LLM-ek (Claude, OpenAI, Gemini, DeepSeek). Kizarolag az Orchestrator altal atadott korlatozott kontextussal es MCP eszkozokkel dolgoznak.
 
 ```mermaid
 graph TD
-    User([Developer / Admin]) -->|1. High-level Task / Epic| OrchestratorKernel
+    User([Fejleszto / Admin]) -->|1. High-level Task / Epic| OrchestratorKernel
 
     subgraph OrchestratorKernel [AI-OS Orchestrator Kernel (Deterministic Python Engine)]
         DAGPlanner[1. DAG Planner & Cycle Checker]

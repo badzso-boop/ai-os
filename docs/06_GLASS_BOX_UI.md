@@ -1,12 +1,12 @@
 # 06. Glass Box UI & Observability Spec
 
-A **Glass Box UI** az AI-OS megfigyelhetosegi (observability) es vezerlo interfacee. Celja, hogy teljes atlathatosagot ("uvegdoboz") biztositson a developer szamara a hatterben futo AI agensek, fajlzarolasok es DAG allapotok felett.
+A **Glass Box UI** az AI-OS megfigyelhetosegi (observability) es vezerlo felulete. Celja, hogy teljes atlathatosagot ("uvegdoboz") biztositson a fejleszto szamara a hatterben futo AI agensek, fajlzarolasok es DAG allapotok felett.
 
 ---
 
-## 1. UI Koncepcio es Interfaceek
+## 1. UI Koncepcio es Feluletek
 
-A Glass Box UI ket formaban all a developer rendelkezesere:
+A Glass Box UI ket formaban all a fejleszto rendelkezesere:
 1. **CLI Terminal Dashboard**: Term terminal alapu, Rich/Textual alapon mukodo valos ideju dashboard.
 2. **Web Dashboard**: React + WebSockets alapon mukodo vizualis DAG es allapot-grafikon.
 
@@ -32,7 +32,7 @@ A Glass Box UI ket formaban all a developer rendelkezesere:
 | `src/types/user.ts` | **SHARED READ** | `TASK-104`, `TASK-105` | None |
 
 ### 2.3. Agent Terminal & Log Streamer
-- Kivalaszthato barmely aktiv agens, es eloben nezheto a prompt generalas, a modell valasza, a worktree git diff-je, valamint a Docker konteneres teszt kimenet.
+- Kivalaszthato barmely aktiv agens, es eloben nezheto a prompt generalas, a modell valasza, a worktree git diff-je, as well as a Docker konteneres teszt kimenet.
 
 ### 2.4. Cost & Token Usage Analytics
 - Valos ideju koltsegkoveto dashboard:
@@ -66,7 +66,7 @@ Az Orchestrator Core egy belso **FastAPI + WebSocket** szervert futtat a nezet v
 
 Amikor a rendszer Preemption allapotba lep (`HITL` statusz):
 - A dashboard kiemeli a blokkolt feladatot.
-- A developernek 3 opcioja van az UI-on keresztul:
+- A fejlesztonek 3 opcioja van az UI-on keresztul:
   1. **Retry with Feedback**: Egyedi instrukcio/utmutatas megadasa az agensnek.
-  2. **Manual Edit & Resume**: A developer maga modositja a kodot a worktree-ben, majd `PASS` gombbal felulbiralja a tesztet.
+  2. **Manual Edit & Resume**: A fejleszto maga modositja a kodot a worktree-ben, majd `PASS` gombbal felulbiralja a tesztet.
   3. **Skip / Abort**: A feladat atugrasa vagy a teljes DAG leallitasa.

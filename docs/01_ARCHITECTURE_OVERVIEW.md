@@ -72,4 +72,3 @@ graph TD
 | File locking (Read/Write Locks) | LockManager | **Deterministic** | Concurrency and data conflict management algorithms. |
 | Code compilation and testing | Ephemeral Docker Sandbox | **Deterministic** | Strict verification output from compilers and runners (pytest, npm test, javac). |
 | Cost & Model selection | DynamicScheduler | **Deterministic / Rule-based** | Evaluated via risk matrix and pricing rules. |
-

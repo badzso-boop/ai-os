@@ -1,19 +1,19 @@
 # 17. Open-Source Launch & "Vibe Coding" YouTube Strategy
 
-This document is the updated script and strategy for the **AI-OS Open-Source YouTube Video Series**, formatted as a "Faceless / Vibe Coding Devlog".
+This document is the **AI-OS Open-Source YouTube Video-Sorozatanak** frissitett, "Faceless / Vibe Coding Devlog" formatumu forgatokonyve.
 
 ---
 
-## 🎧 Video Style & Concept (Faceless Vibe Coding Devlog)
+## 🎧 A Video Stilus es Koncepcio (Faceless Vibe Coding Devlog)
 
-* **Language**: **English** – for the international developer community and higher reach.
-* **Format**: **Faceless**, featuring aesthetic screen recordings and clean terminal/IDE visual elements.
-* **Methodology**: **Vibe Coding / Prompt Engineering** – We don't type code character by character manually; instead, we build AI-OS itself using AI with high-level architecture prompting!
-* **Editing Style**: Dynamic cuts, accelerated (1.5x - 2x) code generation timelines, lo-fi / synthwave background music, clean English voiceover.
+* **Nyelv**: **Angol (English)** – a nemzetkozi fejlesztoi kozosseg and the magasabb eleres erdekeben.
+* **Formatum**: **Faceless (Arc nelkuli)**, esztetikus kepernyofelvetelekkel, letisztult terminal/IDE vizualis elemekkel.
+* **Modszertan**: **Vibe Coding / Prompt Engineering** – Nem manualisan gepeljuk a kodot karakterrol karakterre, hanem az AI-OS-t magat is AI segitsegevel, magas szintu architektura-promptolassal epitjuk fel!
+* **Vagasi Stilus**: Dinamikus vagasok, gyorsitott (1.5x - 2x) kodgeneralasi idovonalak, lo-fi / synthwave hatterzene, tiszta angol hangalamondas (voiceover).
 
 ---
 
-## 🎬 Episode Plan & Editing Script (English Episodes)
+## 🎬 Epizod Terv & Vagasi Forgatokonyv (English Episodes)
 
 ```mermaid
 graph TD
@@ -85,16 +85,15 @@ graph TD
 
 ---
 
-## 🎛️ Editing & Screen Recording Settings (Production Guidelines)
+## 🎛️ Vagasi & Kepernyofelveteli Beallitasok (Production Guidelines)
 
-1. **Audio / Voiceover**:
-   - Record English voiceover post-editing (Voiceover over Montage), or fine-tuned AI voiceover (e.g. ElevenLabs).
-   - Background music: Copyright-free Lo-fi Chill Beats / Synthwave (e.g. Epidemic Sound / Streambeats).
-2. **Screen Recording (OBS Studio)**:
-   - 1080p60 or 4K resolution.
-   - Dark theme (Tokyo Night / Catppuccin Macchiato).
-   - Increased font size in IDE (18px), zoom effects on important code snippets.
-3. **Editing Software (DaVinci Resolve / Premiere Pro)**:
-   - Accelerated code generation (1.5x - 2x speedup).
-   - Smooth transitions (Smooth Pan & Zoom, Sound Effects / Swoosh sounds on terminal outputs).
-
+1. **Audio / Hangalamondas**:
+   - Angol nyelvu hangalamondas (Voiceover) felvetele utolag (Voiceover over Montage), vagy AI szinkronhang (pl. ElevenLabs) finomhangolva.
+   - Hatterzene: Copyright-free Lo-fi Chill Beats / Synthwave (pl. Epidemic Sound / Streambeats).
+2. **Kepernyofelvetel (OBS Studio)**:
+   - 1080p60 vagy 4K felbontas.
+   - Sotet tema (Tokyo Night / Catppuccin Macchiato).
+   - Novelt font meret az IDE-ben (18px), zoom effektusok a fontos kodreszletekre.
+3. **Vagoprogram (DaVinci Resolve / Premiere Pro)**:
+   - Gyorsitott kodgeneralas (1.5x - 2x speedup).
+   - Finom atmenetek (Smooth Pan & Zoom, Sound Effects / Swoosh hangok a terminal kimeneteknel).
