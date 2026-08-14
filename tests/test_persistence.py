@@ -139,3 +139,33 @@ async def test_load_epic_tasks_reconstructs_tasknodes_and_status(tmp_path):
     assert node.target_files == ["a.py", "b.py"]
     assert node.read_set == {"c.py"} and node.write_set == {"a.py"}
     assert node.dependencies == ["T0"]
+
+
+async def test_task_id_collision_across_epics(tmp_path):
+    p = await _open(tmp_path)
+    await p.create_epic("E1", "Epic 1", "prompt 1")
+    await p.create_epic("E2", "Epic 2", "prompt 2")
+
+    t_e1 = _task("T1")
+    t_e2 = _task("T1")
+
+    await p.upsert_task(t_e1, epic_id="E1", assigned_model="sonnet", status="COMPLETED")
+    await p.upsert_task(t_e2, epic_id="E2", assigned_model="haiku", status="PENDING")
+
+    await p.record_token_cost("T1", "anthropic", "sonnet", TokenUsage(input_tokens=100, output_tokens=50, estimated_usd_cost=0.05), epic_id="E1")
+    await p.record_token_cost("T1", "anthropic", "haiku", TokenUsage(input_tokens=200, output_tokens=80, estimated_usd_cost=0.01), epic_id="E2")
+
+    e1_tasks = await p.load_epic_tasks("E1")
+    e2_tasks = await p.load_epic_tasks("E2")
+
+    assert len(e1_tasks) == 1 and e1_tasks[0][1] == "COMPLETED"
+    assert len(e2_tasks) == 1 and e2_tasks[0][1] == "PENDING"
+
+    assert await p.epic_total_usd("E1") == pytest.approx(0.05)
+    assert await p.epic_total_usd("E2") == pytest.approx(0.01)
+
+    summaries = await p.epic_summaries()
+    sum_by_id = {s.id: s for s in summaries}
+    assert sum_by_id["E1"].completed_tasks == 1 and sum_by_id["E1"].total_tasks == 1
+    assert sum_by_id["E2"].completed_tasks == 0 and sum_by_id["E2"].total_tasks == 1
+

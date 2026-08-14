@@ -182,7 +182,9 @@ class TaskRunner:
         if self.on_status_change is not None:
             self.on_status_change(task_id, status)
         if self.persistence is not None:
-            await self._safe_persist(self.persistence.update_task_status(task_id, status))
+            await self._safe_persist(
+                self.persistence.update_task_status(task_id, status, epic_id=self.epic_id)
+            )
 
     def _emit(self, **event) -> None:
         """Fire a structured observability event, swallowing any printer error
@@ -214,7 +216,9 @@ class TaskRunner:
 
         async def audit(filepath: str, lock_type: str, action: str) -> None:
             await self._safe_persist(
-                self.persistence.record_lock_audit(task_id, filepath, lock_type, action)
+                self.persistence.record_lock_audit(
+                    task_id, filepath, lock_type, action, epic_id=self.epic_id
+                )
             )
 
         return audit
@@ -312,7 +316,7 @@ class TaskRunner:
                 if self.persistence is not None and turn_usage is not None:
                     await self._safe_persist(
                         self.persistence.record_token_cost(
-                            task.id, turn_usage.provider, turn_usage.model_name, turn_usage.usage
+                            task.id, turn_usage.provider, turn_usage.model_name, turn_usage.usage, epic_id=self.epic_id
                         )
                     )
 
