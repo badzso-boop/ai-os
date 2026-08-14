@@ -139,6 +139,8 @@ class TaskRunner:
         summarize_threshold: int = 2000,
         test_critic: Optional[Callable[[str], Awaitable[str]]] = None,
         assess_test_quality: bool = True,
+        triage_agent: Optional[Callable[[str, str], Awaitable[str]]] = None,
+        max_triage_retries: int = 2,
     ) -> None:
         # Optional cheap-model summarizer for large validation failure logs — see
         # `build_output_summarizer`. Only invoked when the output exceeds
@@ -157,6 +159,10 @@ class TaskRunner:
         self.knowledge_engine = knowledge_engine
         self.agent_turn_executor = agent_turn_executor
         self.sandbox_runner = sandbox_runner or EphemeralSandboxRunner()
+        # 2-Tier Triage & Self-Healing: cheap LOW-model triage agent to analyze
+        # failures/conflicts and provide actionable recommendations back to the main agent.
+        self.triage_agent = triage_agent
+        self.max_triage_retries = max_triage_retries
         # Optional structured observability hook: receives dict events describing
         # what's happening inside a task run (attempt start, agent turn + model,
         # sandbox validation result, merge outcome, retry). The CLI subscribes to
@@ -405,6 +411,98 @@ class TaskRunner:
                 if attempt < max_attempts:
                     self._emit(type="retry", task_id=task.id, next_attempt=attempt + 1)
 
+            # 2-Tier Triage & Self-Healing Loop:
+            # If standard attempts are exhausted or a fatal block occurred, but a triage_agent
+            # is configured and max_triage_retries > 0, run cheap LOW-model triage analysis
+            # and attempt self-healing turns with the main agent.
+            if self.triage_agent is not None and self.max_triage_retries > 0 and last_output:
+                triage_attempt = 0
+                for triage_attempt in range(1, self.max_triage_retries + 1):
+                    self._emit(
+                        type="triage_analysis", task_id=task.id,
+                        triage_attempt=triage_attempt, max_triage_retries=self.max_triage_retries,
+                    )
+                    try:
+                        recommendation = await self.triage_agent(last_output, last_diff)
+                    except Exception as exc:
+                        self._emit(type="agent_error", task_id=task.id, attempt=attempt, error=f"Triage agent error: {exc}", fatal=False)
+                        break
+
+                    if not recommendation or not recommendation.strip():
+                        break
+
+                    self._emit(
+                        type="triage_recommendation", task_id=task.id,
+                        triage_attempt=triage_attempt, recommendation=recommendation.strip(),
+                    )
+                    triage_feedback = (
+                        f"[TRIAGE AGENT ANALYSIS & RECOMMENDATION]\n"
+                        f"The triage agent analyzed the failure and produced the following fix recommendation:\n"
+                        f"{recommendation.strip()}\n\n"
+                        f"[RAW FAILURE OUTPUT]\n{last_output}"
+                    )
+
+                    triage_turn_ctx = AgentTurnContext(
+                        task=task,
+                        worktree_path=worktree_path,
+                        context_cache=context_cache,
+                        attempt=attempt + triage_attempt,
+                        previous_validation_output=triage_feedback,
+                        project_conventions=self.project_conventions,
+                    )
+
+                    try:
+                        turn_usage = await self.agent_turn_executor(triage_turn_ctx)
+                    except Exception as exc:
+                        self._emit(type="agent_error", task_id=task.id, attempt=attempt, error=f"Self-healing turn failed: {exc}", fatal=False)
+                        break
+
+                    if turn_usage is not None:
+                        self._emit(
+                            type="agent_turn", task_id=task.id, attempt=attempt + triage_attempt,
+                            provider=turn_usage.provider, model=turn_usage.model_name,
+                            input_tokens=turn_usage.usage.input_tokens,
+                            output_tokens=turn_usage.usage.output_tokens,
+                            usd=turn_usage.usage.estimated_usd_cost,
+                        )
+
+                    try:
+                        last_changed_files, last_diff = await self.staging.worktree_changes(task.id)
+                    except Exception:
+                        pass
+
+                    async def triage_validator(wt_path: Path) -> bool:
+                        nonlocal last_output
+                        result = await self.sandbox_runner.run_validation(wt_path, language)
+                        last_output = result.output
+                        self._emit(
+                            type="validation", task_id=task.id, attempt=attempt + triage_attempt,
+                            success=result.success, exit_code=result.exit_code,
+                            summary=result.summary, output=result.output,
+                        )
+                        return result.success
+
+                    try:
+                        triage_merged = await self.staging.stage_and_merge_task(
+                            task.id, f"{task.id}: triage attempt {triage_attempt}", triage_validator
+                        )
+                    except ValidationCallbackError as exc:
+                        detail = str(exc.__cause__) if exc.__cause__ else str(exc)
+                        last_output = f"Validation infra error during triage: {detail}"
+                        break
+
+                    if triage_merged:
+                        self._emit(type="merged", task_id=task.id, attempt=attempt + triage_attempt, triage_healed=True)
+                        await self._report_status(task.id, "COMPLETED")
+                        presence, critique = await self._assess_validator_quality(
+                            task, last_changed_files, last_diff
+                        )
+                        return TaskRunResult(
+                            task_id=task.id, status="COMPLETED", attempts=attempt + triage_attempt,
+                            final_output=last_output, test_presence=presence,
+                            test_critique=critique, changed_files=last_changed_files,
+                        )
+
             # BLOCKED: remove the worktree dir but KEEP the branch so the
             # failing code stays inspectable (git checkout ai-os/<task-id>, or a
             # pushed branch + the error in the PR body) — instead of discarding it.
@@ -445,6 +543,38 @@ def build_output_summarizer(
         return text or output
 
     return summarize
+
+
+TRIAGE_AGENT_SYSTEM_PROMPT = (
+    "You are a Senior Software & DevOps Triage Specialist. An automated task execution "
+    "attempt hit a failure (Git merge conflict, validation failure, or compilation error).\n"
+    "Your job is to diagnose the root cause and provide a clear, step-by-step recommendation "
+    "for the primary coding agent on how to resolve the issue.\n\n"
+    "Format your output as:\n"
+    "1. DIAGNOSIS: (What went wrong, exact conflict or failing assertion)\n"
+    "2. PROPOSED FIX: (Concrete steps and precise code/git changes recommended)"
+)
+
+
+def build_triage_agent(
+    adapter: BaseMCPAdapter, model: str | None = None
+) -> Callable[[str, str], Awaitable[str]]:
+    """Build a cheap LOW-model triage agent for 2-tier self-healing: given the raw failure
+    output and git diff, produces a structured diagnosis and actionable recommendation
+    for the primary agent."""
+
+    async def triage(failure_output: str, git_diff: str) -> str:
+        payload = f"=== FAILURE OUTPUT ===\n{failure_output}\n\n=== RECENT GIT DIFF ===\n{git_diff}"
+        request = LLMTaskRequest(
+            task_id="triage-analysis",
+            system_prompt=TRIAGE_AGENT_SYSTEM_PROMPT,
+            context_payload=payload,
+            model=model,
+        )
+        response = await adapter.execute_task(request)
+        return (response.generated_text or "").strip()
+
+    return triage
 
 
 # -- validator-quality: cheap-model test critic (Phase 6, feature 1c) -------------

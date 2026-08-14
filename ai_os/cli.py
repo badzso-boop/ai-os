@@ -707,8 +707,18 @@ def _make_event_printer(verbose: bool = False, console: Console | None = None):
             con.print(f"  [red]⚠ {tid} agent error[/red] — {ev.get('error', '')}")
         elif t == "retry":
             con.print(f"  [yellow]↻ {tid} retrying (attempt {ev.get('next_attempt')})[/yellow]")
+        elif t == "triage_analysis":
+            con.print(f"  [cyan]🩺 {tid} triage agent analyzing failure (triage attempt {ev.get('triage_attempt')}/{ev.get('max_triage_retries')})...[/cyan]")
+        elif t == "triage_recommendation":
+            con.print(f"  [cyan]💡 {tid} triage recommendation:[/cyan]")
+            rec = (ev.get("recommendation") or "").strip()
+            if rec:
+                con.print(Panel(rec, title=f"{tid} triage fix recommendation", border_style="cyan", expand=False))
         elif t == "merged":
-            con.print(f"  [green]✓ {tid} merged[/green]")
+            if ev.get("triage_healed"):
+                con.print(f"  [bold green]✓ {tid} merged (self-healed via triage)[/bold green]")
+            else:
+                con.print(f"  [green]✓ {tid} merged[/green]")
         elif t == "test_quality":
             if ev.get("missing_tests"):
                 con.print(f"  [yellow]⚠ {tid} no test added for a code change[/yellow]")
@@ -841,9 +851,13 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
         # Cheap-model test critic (feature 1c): one extra cheap call per COMPLETED
         # task, judging test quality on its diff — surfaced in the PR body.
         test_critic = build_test_critic(adapters[low.provider], low.model)
+        # 2-Tier Triage Agent: cheap LOW-model triage analysis to recommend fixes
+        # for failed/blocked tasks to the primary agent for self-healing.
+        triage_agent = build_triage_agent(adapters[low.provider], low.model)
     except Exception:
         summarizer = None  # no LOW provider configured -> skip summarization
         test_critic = None
+        triage_agent = None
 
     async def _execute():
         # Accounting (Stage 3): persist epic + per-task rows + token/lock audit
@@ -854,6 +868,7 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
             sandbox_runner=EphemeralSandboxRunner(),
             summarizer=summarizer,
             test_critic=test_critic,
+            triage_agent=triage_agent,
             # Terminal states only — the attempt/validation events (on_event)
             # cover the in-flight detail, so RUNNING would just be noise.
             on_status_change=lambda tid, status: (

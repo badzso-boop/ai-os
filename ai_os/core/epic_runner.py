@@ -127,6 +127,7 @@ class EpicRunner:
         on_event: Optional[Callable[[dict], None]] = None,
         summarizer: Optional[Callable] = None,
         test_critic: Optional[Callable] = None,
+        triage_agent: Optional[Callable] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.scheduler = scheduler
@@ -259,6 +260,7 @@ class EpicRunner:
             project_conventions=self.project_conventions,
             summarize_output=self.summarizer,
             test_critic=self.test_critic,
+            triage_agent=self.triage_agent,
         )
         return await runner.run_task(task, language=resolve_task_language(task, self.language))
 
