@@ -1,12 +1,12 @@
 # 12. Glass Box UI & Interactive HITL Workflow Spec
 
-This document is the **AI-OS Glass Box UI** es a **Human-In-The-Loop (HITL) Interaktiv Vezerlo interface** teljesseggel reszletezett specification. Kidolgozza a valos ideju megfigyelhetoseget, az Epic/DAG feladatbontas developer jovahagyasi stepet (Planning Approval), a menet kozbeni kozbeszolast (Preemption), valamint a Monaco Editorral integralt kezi hibajavitasi munkafolyamatot.
+This document is the **AI-OS Glass Box UI** and the **Human-In-The-Loop (HITL) Interaktiv Vezerlo felulet** teljesseggel reszletezett specifikacioja. Kidolgozza a valos ideju megfigyelhetoseget, az Epic/DAG feladatbontas fejlesztoi jovahagyasi lepeset (Planning Approval), a menet kozbeni kozbeszolast (Preemption), as well as a Monaco Editorral integralt kezi hibajavitasi munkafolyamatot.
 
 ---
 
 ## 1. Architektura es UI Komponens-Szerkezet
 
-A Glass Box UI egy **React 18 + TypeScript + Vite + TailwindCSS + React Flow + Monaco Editor** alapu webes interface, amely WebSockets-en keresztul kommunikal az Orchestrator FastAPI hatterrendszerevel.
+A Glass Box UI egy **React 18 + TypeScript + Vite + TailwindCSS + React Flow + Monaco Editor** alapu webes felulet, amely WebSockets-en keresztul kommunikal az Orchestrator FastAPI hatterrendszerevel.
 
 ```mermaid
 graph TD
@@ -31,24 +31,24 @@ graph TD
 
 ## 2. A 3-Lepcsos Human-In-The-Loop (HITL) Munkafolyamat
 
-Az AI-OS nem fut vakon. A developer (Human) a teljes folyamat felett rendelkezo kontrollal bir az alabbi 3 szinten:
+Az AI-OS nem fut vakon. A fejleszto (Human) a teljes folyamat felett rendelkezo kontrollal bir az alabbi 3 szinten:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PromptSubmitted: Developer beirja az Epic kerest
+    [*] --> PromptSubmitted: Fejleszto beirja az Epic kerest
     PromptSubmitted --> PlanningDAG: LLM DAG Planner felbontja a feladatot
     
     state HITL_Stage1_PlanReview {
         PlanningDAG --> WaitingForPlanApproval: PLAN_REVIEW allapot (PAUSED)
-        WaitingForPlanApproval --> PlanApproved: Developer Jovahagyja / Modositja
-        WaitingForPlanApproval --> PlanningDAG: Developer Ujratervezest Ker (Feedback)
+        WaitingForPlanApproval --> PlanApproved: Fejleszto Jovahagyja / Modositja
+        WaitingForPlanApproval --> PlanningDAG: Fejleszto Ujratervezest Ker (Feedback)
     }
 
     PlanApproved --> ExecutingDAG: Orchestrator elinditja az agenseket
     
     state HITL_Stage2_RuntimePreemption {
-        ExecutingDAG --> RuntimePaused: Developer rakattint: "Kozbeszolas / Pause"
-        RuntimePaused --> ExecutingDAG: Developer Folytatja (Resume)
+        ExecutingDAG --> RuntimePaused: Fejleszto rakattint: "Kozbeszolas / Pause"
+        RuntimePaused --> ExecutingDAG: Fejleszto Folytatja (Resume)
     }
 
     ExecutingDAG --> ValidationFailed: Konteneres Teszt Sikertelen (Retry >= 3)
@@ -65,12 +65,12 @@ stateDiagram-v2
 
 ### 2.1. HITL Stage 1: DAG Tervezet Jovahagyas & Szerkesztes (Plan Review)
 
-Amikor a developer megad egy kerest (pl. *"Keszits JWT alapu autentikaciot"*):
-1. A DAG Planner generates a feladatbontas tervezetet (Epicek, Taskok, fuggosegek, varhato `write_set` fajlok).
+Amikor a fejleszto megad egy kerest (pl. *"Keszits JWT alapu autentikaciot"*):
+1. A DAG Planner eloallitja a feladatbontas tervezetet (Epicek, Taskok, fuggosegek, varhato `write_set` fajlok).
 2. **A rendszer automatikusan megall (`PLAN_REVIEW` allapot)**.
-3. A Glass Box UI megjeleniti az interaktiv grafnezetet es feladattablazatot, ahol a developer:
+3. A Glass Box UI megjeleniti az interaktiv grafnezetet es feladattablazatot, ahol a fejleszto:
    - **Modosithatja a fuggosegi eleket** (drag-and-drop a React Flow vasznon).
-   - **Szerkesztheti a feladatok adatait** (Cim, Description, Erintett fajlok, Kockazati szint).
+   - **Szerkesztheti a feladatok adatait** (Cim, Leiras, Erintett fajlok, Kockazati szint).
    - **Uj feladatot adhat hozza vagy torolhet**.
    - Gombok: **"DAG Jovahagyasa & Inditas"** vagy **"Ujratervezes Kerese Instrukcioval"**.
 
@@ -78,9 +78,9 @@ Amikor a developer megad egy kerest (pl. *"Keszits JWT alapu autentikaciot"*):
 
 ### 2.2. HITL Stage 2: Menet Kozbeni Kozbeszolas (Runtime Preemption)
 
-A developer barmikor, a vegrehajtas kellos kozepen rakattinthat a **"PAUSE / KOZBESZOLAS"** gombra:
-- Az Orchestrator befejezi a folyamatban levo atomi muveleteket, majd felfuggeszti a DAG utefieldt.
-- A developer megvizsgalhatja az aktiv Git Worktree-ket, leallithat egy nem megfeleloen kodolo agenst, vagy modosithatja a zarolasokat.
+A fejleszto barmikor, a vegrehajtas kellos kozepen rakattinthat a **"PAUSE / KOZBESZOLAS"** gombra:
+- Az Orchestrator befejezi a folyamatban levo atomi muveleteket, majd felfuggeszti a DAG utemezot.
+- A fejleszto megvizsgalhatja az aktiv Git Worktree-ket, leallithat egy nem megfeleloen kodolo agenst, vagy modosithatja a zarolasokat.
 - Gomb: **"Folytatas (Resume)"**.
 
 ---
@@ -89,16 +89,16 @@ A developer barmikor, a vegrehajtas kellos kozepen rakattinthat a **"PAUSE / KOZ
 
 Ha egy agens 3 egymast koveto alkalommal is elhasal a Docker konteneres validacion:
 - A feladat **piros szegellyel `HITL_REQUIRED` allapotba kerul**.
-- A jobb oldali felugro panelen (HITL Drawer) a developernek **3 cselekvesi lehetosege van**:
+- A jobb oldali felugro panelen (HITL Drawer) a fejlesztonek **3 cselekvesi lehetosege van**:
 
 #### Opcio A: "Instrukcio adasa & Retry"
-A developer beir egy szoveges utmutatast az agensnek (pl. *"Ne hozz letre uj osztalyt, hasznald a meglevo HelperService.ts static metodusat!"*), es rakattint az **"Ujraprobalkozas"** gombra.
+A fejleszto beir egy szoveges utmutatast az agensnek (pl. *"Ne hozz letre uj osztalyt, hasznald a meglevo HelperService.ts static metodusat!"*), es rakattint az **"Ujraprobalkozas"** gombra.
 
 #### Opcio B: "Kezi Kodmodositas (Monaco Editor) & Resume"
 A UI megnyitja a beepitett **Monaco Editor-t (VS Code szerkeszto elmeny)** kozvetlenul az agens Git Worktree-jeben levo fajlra!
-- A developer kijavitja a hibat a bongeszoben.
+- A fejleszto kijavitja a hibat a bongeszoben.
 - Rakattint a **"Konteneres Teszt Futtatasa a UI-rol"** gombra.
-- Ha a teszt green, a **"Jovahagyas & Folytatas"** gombbal felulbiralja az agenst, es a DAG halad tovabb!
+- Ha a teszt zold, a **"Jovahagyas & Folytatas"** gombbal felulbiralja az agenst, and the DAG halad tovabb!
 
 #### Opcio C: "Feladat Atugrasa (Skip) vagy Abort"
 A feladat megjelolese atugrottkent, vagy a teljes Epic leallitasa.
@@ -107,7 +107,7 @@ A feladat megjelolese atugrottkent, vagy a teljes Epic leallitasa.
 
 ## 3. Valos Ideju Megfigyelhetoseg (Glass Box Console)
 
-A Glass Box UI garantalja, hogy a developer minden pillanatban pontosan latja:
+A Glass Box UI garantalja, that the fejleszto minden pillanatban pontosan latja:
 
 1. **Modell Kiosztas es Koltsegek**:
    - `TASK-101`: **Claude 3.5 Sonnet** (High Risk) ➔ *$0.042 / 14,200 tokens*
@@ -115,7 +115,7 @@ A Glass Box UI garantalja, hogy a developer minden pillanatban pontosan latja:
 2. **Elo Log es Prompt Stream**:
    - Lasd az agensnek elkuldott tomoritett *Context Cache*-t.
    - Lasd az agens altal kibocsatott MCP Tool hivasokat (`propose_file_patch`).
-   - Lasd a Git Worktree valos ideju `git diff` nezetet (piros/green kodvaltozasok).
+   - Lasd a Git Worktree valos ideju `git diff` nezetet (piros/zold kodvaltozasok).
    - Lasd a Docker kontener tesztkimenetet (stdout/stderr).
 
 ---

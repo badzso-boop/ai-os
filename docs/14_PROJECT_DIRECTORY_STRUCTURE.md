@@ -1,10 +1,10 @@
 # 14. Project Directory Layout & Package Blueprint
 
-This document is the complete specification for the **AI-OS Repository Directory Structure and Module Layout**.
+This document is the **AI-OS Repository Konyvtarstrukturajanak es Modul-Elrendezesenek** teljes specifikacioja.
 
 ---
 
-## 1. Full Directory Layout (Repository Layout)
+## 1. Teljes Konyvtarstruktura (Repository Layout)
 
 ```
 ai-os/

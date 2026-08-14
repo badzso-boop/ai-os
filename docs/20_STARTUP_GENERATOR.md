@@ -1,16 +1,16 @@
 # 20. Startup Generator — `ai-os startup`
 
-> **Status: Design Document.** This command is NOT YET implemented.
+> **Statusz: design document (design doc).** This command NOT YET implemented.
 > A dokumentum a `ai-os startup` teljes tervet irja le: bemenet, pipeline,
-> determinisztikus vaz + LLM-filling, validacio, es a live deployra kotes (a
-> deploy reszleteit a `21_STATIC_SUBDOMAIN_DEPLOY.md` irja le). Kod angol, prose
+> determinisztikus vaz + LLM-kitoltes, validacio, and the live deployra kotes (a
+> deploy reszleteit a `21_STATIC_SUBDOMAIN_DEPLOY.md` irja le). Kod angol, proza
 > magyar.
 
 ---
 
-## 1. What it does in one sentence
+## 1. Mit csinal egy mondatban
 
-`ai-os startup` egy **detailed szoveges startup-descriptionbol** egy **tiszta,
+`ai-os startup` egy **reszletes szoveges startup-leirasbol** egy **tiszta,
 onmagaban futo statikus HTML/CSS/JS demot** general, ami bemutatja a startupot es
 **szimulalja a operation** — valodi backend nelkul —, validalja, majd (opcionalisan)
 azonnal ki is deployolja egy sajat subdomainre.
@@ -21,9 +21,9 @@ be lehet mutatni befektetonek/ugyfelnek vagy validalni lehet vele az otletet.
 
 ---
 
-## 2. Exact Output Structure
+## 2. A kimenet pontosan
 
-- **Onmagaban futo (self-contained) statikus site.** Se build-step futasidoben,
+- **Onmagaban futo (self-contained) statikus site.** Se build-lepes futasidoben,
   se kulso halozati hivas — minden asset a bundle-ben (a `claude.ai` Artifact-ok
   szigoru CSP-filozofiajaval rokon: inline/embedded assetek, nincs kulso CDN).
   Ez teszi a deployt trivialissa (csak fajlokat kell kiszolgalni) es biztonsagossa.
@@ -32,32 +32,32 @@ be lehet mutatni befektetonek/ugyfelnek vagy validalni lehet vele az otletet.
   perzisztencia (a demo „emlekszik" reload utan), szimulalt auth (bejelentkezes
   barmilyen adattal), fake API-valaszok, seedelt minta-adat. Az LLM csak
   *bekotogeti* a flow-kat ehhez — a reteget mi adjuk (Compiler First).
-- **Tobb oldal / IA.** A descriptionbol levezetett informacios architektura: landing,
-  „hogyan works", ar, egy interaktiv „termek-demo" oldal (a lenyeg), esetleg
+- **Tobb oldal / IA.** A leirasbol levezetett informacios architektura: landing,
+  „hogyan mukodik", ar, egy interaktiv „termek-demo" oldal (a lenyeg), esetleg
   dashboard-szimulacio.
-- **Brand-illeszkedes.** Szinpaletta, tipografia, tone, ikonografia a description
+- **Marka-illeszkedes.** Szinpaletta, tipografia, hangnem, ikonografia a leiras
   based on — de a `dataviz`/artifact-design elveivel (light+dark, kontraszt,
   konzisztens tokenek).
 - **Alap SEO + a11y + reszponzivitas** beepitve a determinisztikus vazba.
 
 ---
 
-## 3. Input — The Startup Prompt
+## 3. Bemenet — a startup-prompt
 
-A parancs egy **detailed** descriptiont var. Minel konkretabb, annal pontosabb a demo.
+A parancs egy **reszletes** leirast var. Minel konkretabb, annal pontosabb a demo.
 Ketfelekepp adhato:
 
 - **Inline:** `ai-os startup --prompt "..."`.
-- **Brief-fajl:** `ai-os startup --brief startup.md` — egy strukturalt description,
+- **Brief-fajl:** `ai-os startup --brief startup.md` — egy strukturalt leiras,
   amit erdemes verziozni. Ajanlott vaz (`.ai-os/startup.md` sablon):
 
 ```markdown
 # Startup brief
 
 ## Nev + egymondatos value prop
-FreshBox — heti dobozos, helyi termeloi greenseg-elofizetes budapesti haztartasoknak.
+FreshBox — heti dobozos, helyi termeloi zoldseg-elofizetes budapesti haztartasoknak.
 
-## Target audience
+## Celkozonseg
 Egeszsegtudatos, elfoglalt 28–45 evesek, akik tamogatnak a helyi termeloket.
 
 ## A demo fo flow-ja (EZT szimulaljuk mukodokent)
@@ -66,28 +66,28 @@ Egeszsegtudatos, elfoglalt 28–45 evesek, akik tamogatnak a helyi termeloket.
 3. „Elofizet" (fake checkout, fake fizetes), lat egy megerositest + egy
    dashboard-ot a kovetkezo szallitassal.
 
-## Pages
-Landing, Hogyan works, Arazas, Termek-demo (interaktiv), Dashboard (szimulalt).
+## Oldalak
+Landing, Hogyan mukodik, Arazas, Termek-demo (interaktiv), Dashboard (szimulalt).
 
-## Brand / tone
-Friss, green, baratsagos, minimal. Kezzel rajzolt greenseg-illusztraciok hangulat.
-Elsodleges szin: termeszetes green. Light + sotet mod.
+## Marka / hangnem
+Friss, zold, baratsagos, minimal. Kezzel rajzolt zoldseg-illusztraciok hangulat.
+Elsodleges szin: termeszetes zold. Vilagos + sotet mod.
 
 ## Amit NEM kell
 Valodi fizetes, valodi user-fiok, admin, e-mail — minden szimulalt.
 ```
 
-A briefbol egy strukturalt **design brief** keszul (4.1), ami a pipeline gerince.
+A briefbol egy strukturalt **design brief** keszul (4.1), which the pipeline gerince.
 
 ---
 
-## 4. The Pipeline
+## 4. A pipeline
 
 ```
 [startup-prompt / brief]
      │
      ▼
-(1) Design Brief expanzio  ── eros modell ──►  strukturalt brief (IA, flow-k, brand-tokenek, komponensek, tartalom-vazlat)
+(1) Design Brief expanzio  ── eros modell ──►  strukturalt brief (IA, flow-k, marka-tokenek, komponensek, tartalom-vazlat)
      │
      ▼
 (2) Determinisztikus vaz  ── scaffold.py "startup" preset ──►  reset/tokenek/layout/sim.js/oldal-vazak  (0 token)
@@ -105,7 +105,7 @@ A briefbol egy strukturalt **design brief** keszul (4.1), ami a pipeline gerince
 (6) Osszeszereles          ── determinisztikus ──►  self-contained bundle (asset-inline, CSP-tiszta)  (0 token)
      │
      ▼
-(7) Validacio              ── determinisztikus (Playwright sandbox) ──►  betolt? fo flow clickable? nincs konzol-hiba? a11y/SEO baseline?
+(7) Validacio              ── determinisztikus (Playwright sandbox) ──►  betolt? fo flow kattinthato? nincs konzol-hiba? a11y/SEO baseline?
      │
      ▼
 (8) Deploy (opcionalis)    ── SCRIPT (nem AI) ──►  elo subdomain  (lasd 21. doc)
@@ -114,9 +114,9 @@ A briefbol egy strukturalt **design brief** keszul (4.1), ami a pipeline gerince
 ### 4.1. Design Brief expanzio (eros modell)
 
 A nyers promptbol egy **gepi sema** keszul: `pages[]` (mindegyikhez cel + fo
-komponensek), `core_flow[]` (a szimulalando stepek), `brand` (szintokenek,
-tipografia, tone), `sim_model` (milyen mock-entitasok kellenek: pl. Box,
-Product, Subscription, User). Ez a decompose-hoz hasonlo architekturalis step →
+komponensek), `core_flow[]` (a szimulalando lepesek), `brand` (szintokenek,
+tipografia, hangnem), `sim_model` (milyen mock-entitasok kellenek: pl. Box,
+Product, Subscription, User). Ez a decompose-hoz hasonlo architekturalis lepes →
 a legerosebb konfiguralt modellre routol (mint az `epic_planner`
 `planning_assignment`-je).
 
@@ -135,10 +135,10 @@ sim/sim.js                # a szimulalt backend konyvtar (mock store, fake API, 
 sim/seed.js               # a demo seed-adat (a design brief sim_model-jebol)
 pages/*.html              # oldalankenti vaz (fejlec/lablec include-dal)
 app.js                    # oldal-routing (statikus, hash/He History), theme, sim-init
-.ai-os/ui.json            # a Playwright-validaciohoz (dev/preview parancs + fo flow stepek)
+.ai-os/ui.json            # a Playwright-validaciohoz (dev/preview parancs + fo flow lepesek)
 ```
 
-Az LLM igy **csak a tartalmat, a markat es a flow-bekotest** tolti ki — a
+Az LLM igy **csak a tartalmat, a markat and the flow-bekotest** tolti ki — a
 vaz-donteseket (reszponzivitas, tokenek, sim-API) determinisztikusan kapja. Ez
 gyorsabb, olcsobb es konzisztensebb, mint minden alkalommal a nullarol.
 
@@ -156,27 +156,27 @@ gyorsabb, olcsobb es konzisztensebb, mint minden alkalommal a nullarol.
 - **`sim.pay`** — fake checkout: egy hiheto fizetesi UI, ami mindig „sikerul"
   (vagy szkriptelten hibazik demohoz).
 - Az LLM a fo flow-t **ezekre hivja ra**, nem talal ki sajat mock-mechanizmust —
-  igy determinisztikus, tesztelheto, es a Playwright-smoke stabilan validalja.
+  igy determinisztikus, tesztelheto, and the Playwright-smoke stabilan validalja.
 
 ### 4.4. Validacio (determinisztikus, Playwright)
 
 Ujrahasznositja a `19_UI_DEBUG_TOOLCHAIN.md` Playwright-reteget, de itt
 **smoke-tesztkent**: az ephemeral sandboxban (Playwright-image) betolti az oldalt
 es ellenorzi: minden oldal 200-nal renderel, nincs konzol-hiba, a `core_flow`
-stepei vegigclickablek (a `.ai-os/ui.json`-ban deklaralt stepek), a
-theme-toggle works, alap a11y (minden interaktiv elemnek van elerheto neve),
+lepesei vegigkattinthatok (a `.ai-os/ui.json`-ban deklaralt lepesek), a
+theme-toggle mukodik, alap a11y (minden interaktiv elemnek van elerheto neve),
 alap SEO (title/meta/OG jelen). A Phase 6 **test-presence** itt is elvarja a
 `core_flow` Playwright-tesztjet a bundle melle.
 
 ---
 
-## 5. Determinisztikus vs LLM responsible forseg
+## 5. Determinisztikus vs LLM felelosseg
 
 | Feladat | Ki |
 | ------- | -- |
 | Vaz, tokenek, layout-primitivek, sim.js | **determinisztikus** (scaffold preset) |
 | Brief → strukturalt design brief | **eros modell** |
-| Pages tartalma + komponensei | **kozepes modell** (parhuzamos) |
+| Oldalak tartalma + komponensei | **kozepes modell** (parhuzamos) |
 | Copy / mock-seed szovegek | **olcso modell** |
 | Fo flow bekotese a sim-re | **kozepes modell** |
 | Bundle osszeszereles, asset-inline | **determinisztikus** |
@@ -186,14 +186,14 @@ alap SEO (title/meta/OG jelen). A Phase 6 **test-presence** itt is elvarja a
 
 ---
 
-## 6. Model Routing and Cost
+## 6. Modell-routing es koltseg
 
-A generalas **nem egy nagy monolit prompt**, hanem a fenti stepek, amelyek nagy
-resze **parhuzamosithato** (az pages fuggetlenek). Ez raillesztheto a meglevo
-`EpicRunner` batch-mechanizmusara (generation = design brief → pages
+A generalas **nem egy nagy monolit prompt**, hanem a fenti lepesek, amelyek nagy
+resze **parhuzamosithato** (az oldalak fuggetlenek). Ez raillesztheto a meglevo
+`EpicRunner` batch-mechanizmusara (generation = design brief → oldalak
 parhuzamosan → sim-bekotes → osszeszereles), a `DynamicScheduler` risk→model
-routingjaval: a brief CRITICAL, az pages MEDIUM, a copy LOW. Igy a draga modellt
-csak az architekturalis dontesre hasznaljuk, a tomegmunkat olcsora visszuk — es a
+routingjaval: a brief CRITICAL, az oldalak MEDIUM, a copy LOW. Igy a draga modellt
+csak az architekturalis dontesre hasznaljuk, a tomegmunkat olcsora visszuk — and the
 `AI_OS_EPIC_BUDGET_USD` cap itt is ved a tulkoltekezestol.
 
 Alternativa (egyszerubb indulashoz): egy dedikalt, konnyu pipeline az `EpicRunner`
@@ -204,10 +204,10 @@ megengedi.
 
 ---
 
-## 7. CLI Surface
+## 7. CLI
 
 ```
-ai-os startup --prompt "<detailed description>"          # general + validal
+ai-os startup --prompt "<reszletes leiras>"          # general + validal
 ai-os startup --brief startup.md                     # brief-fajlbol
 ai-os startup --prompt "..." --subdomain freshbox    # general + validal + DEPLOY
 ai-os startup --prompt "..." --no-deploy             # csak lokalisan, deploy nelkul
@@ -223,7 +223,7 @@ parancsot — azt a script intezi (kontextus + biztonsag, lasd 21.).
 
 ---
 
-## 8. Generated Project Layout
+## 8. Generalt projekt-elrendezes
 
 ```
 freshbox-demo/
@@ -234,7 +234,7 @@ freshbox-demo/
   app.js
   assets/…                # inline-olva a vegso bundle-be, vagy kis statikus fajlok
   tests/flow.spec.ts      # a core_flow Playwright smoke-tesztje (Phase 6)
-  .ai-os/ui.json          # preview + flow-stepek a validaciohoz
+  .ai-os/ui.json          # preview + flow-lepesek a validaciohoz
   README.md               # mi ez, hogyan futtathato lokalisan, hogy deployolhato
 ```
 
@@ -243,7 +243,7 @@ pedig epp emiatt eleg egy nginx-kontenerbe bemountolni (21. doc).
 
 ---
 
-## 9. Deploy Binding (Bridge to Document 21)
+## 9. Deploy-kotes (a hid a 21. dokumentumhoz)
 
 Ha `--subdomain <nev>` meg van adva, a sikeres validacio utan a parancs meghivja
 a **`scripts/deploy_static.sh`** scriptet a `--dir <generalt bundle>` es
@@ -255,10 +255,10 @@ a szigoru biztonsagi szabalyokat a `21_STATIC_SUBDOMAIN_DEPLOY.md` irja le.
 
 ---
 
-## 10. Limitations (Honest Assessment)
+## 10. Korlatok (oszinten)
 
 - **Nincs valodi backend.** Ez szandek: koncepcio-demo, nem MVP. A `sim` reteg
-  meggyozo, de nem perzisztal szerveroldalon, nincs tobbusers valos adat.
+  meggyozo, de nem perzisztal szerveroldalon, nincs tobbfelhasznalos valos adat.
   (Egy jovobeli „export to real project" hid az `ai-os init`-re valthatna a demot
   igazi FastAPI/Next backendre.)
 - **Design-minoseg modellfuggo.** A determinisztikus vaz + tokenek garantaljak a
@@ -270,33 +270,33 @@ a szigoru biztonsagi szabalyokat a `21_STATIC_SUBDOMAIN_DEPLOY.md` irja le.
 
 ---
 
-## 11. Security and Ethics
+## 11. Biztonsag es etika
 
 - A generalt oldal **statikus, self-contained, titok nelkuli** — nincs mit
   kiszivarogtatni, nincs kulso hivas.
-- **Ne imitaljon valos ceget/szemelyt.** A generator a user sajat
-  startup-otletet demozza; tiltott valos brand/logo/domain meghamisitasa vagy
+- **Ne imitaljon valos ceget/szemelyt.** A generator a felhasznalo sajat
+  startup-otletet demozza; tiltott valos marka/logo/domain meghamisitasa vagy
   megteveszto „valodi termeknek latszo" tartalom (ugyanaz az elv, mint az
   Artifact-oknal). A HITL-preview kapu ad emberi kontrollt a deploy elott.
 - A deploy izolalt es additiv (21.), a live szerver mas projektjeit nem erinti.
 
 ---
 
-## 12. Future Extensions
+## 12. Jovobeli kiterjesztesek
 
 - **Tobb design-varians egy futasbol** (A/B/C), valaszthato elonezettel.
 - **Export igazi projektte** — a demo `sim`-reteget lecserelni valodi
   backendre az `ai-os init` presetjeivel (a demo lesz a spec).
 - **Analytics-snippet** (privacy-barat, onhosztolt) a demo-subdomainre.
 - **TTL / auto-lejarat** a demo-subdomainekre (a deploy-registrybol, 21.).
-- **Tartalom-import** (logo, brand-kit feltoltes) a brand-illeszkedeshez.
+- **Tartalom-import** (logo, brand-kit feltoltes) a marka-illeszkedeshez.
 
 ---
 
-## Related Documents
+## Kapcsolodo dokumentumok
 
 - `19_UI_DEBUG_TOOLCHAIN.md` — a Playwright-reteg, amit a smoke-validacio hasznal.
-- `21_STATIC_SUBDOMAIN_DEPLOY.md` — az elo subdomain-deploy script es a megosztott
+- `21_STATIC_SUBDOMAIN_DEPLOY.md` — az elo subdomain-deploy script and the megosztott
   szerver biztonsagi szabalyai.
 - `README.md` → `ai-os init` — a scaffold preset-mechanizmus, amire a „startup"
   preset epul.

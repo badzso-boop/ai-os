@@ -1,10 +1,10 @@
 # 13. Database Schema & Async SQLAlchemy Models
 
-This document is the complete specification for the **AI-OS Database Schema and SQLAlchemy 2.0 Async Models**. The database runs on SQLite 3 (WAL Mode) with async ORM support (`aiosqlite`).
+This document is the **AI-OS Adatbazis Sema es SQLAlchemy 2.0 Async Modellek** teljes specifikacioja. Az adatbazis SQLite 3 (WAL Mode) alapon fut, aszinkron ORM tamogatassal (`aiosqlite`).
 
 ---
 
-## 1. ER Diagram (Entity-Relationship Diagram)
+## 1. ER Diagram (Adatbazis Egyed-Kapcsolat Diagram)
 
 ```mermaid
 erDiagram

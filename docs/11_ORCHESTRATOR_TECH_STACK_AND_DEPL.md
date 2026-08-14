@@ -1,15 +1,15 @@
 # 11. Orchestrator Tech Stack, Database & Deployment Spec
 
-This document is the **AI-OS Orchestrator Engine es MCP Szerver** technologiai megvalositasanak, adatbazis-architekturajanak, Docker kontenerizaciojanak es HTTP/WebSocket/MCP API vegpontjainak teljesseggel reszletezett specification.
+This document is the **AI-OS Orchestrator Engine es MCP Szerver** technologiai megvalositasanak, adatbazis-architekturajanak, Docker kontenerizaciojanak es HTTP/WebSocket/MCP API vegpontjainak teljesseggel reszletezett specifikacioja.
 
 ---
 
 ## 1. Programozasi Nyelv es Konyvtar-Stakk
 
-Az Orchestrator Core es az MCP Szerver nyelve: **Python 3.12+**.
+Az Orchestrator Core and the MCP Szerver nyelve: **Python 3.12+**.
 
 ### Miert Python?
-1. **Aszinkron Concurrency**: Az `asyncio` lehetove teszi tobb szaz parhuzamos LLM hivas, hatterfolyamat (Git, Docker) es WebSocket kapcsolat nem-blokkolo kezeleset alacsony memoria-labnyom mellett.
+1. **Aszinkron Concurrency**: Az `asyncio` lehetove teszi tobb szaz parhuzamos LLM hivas, hatterfolyamat (Git, Docker) es WebSocket kapcsolat nem-blokkolo kezeleset alacsony memoria-labnyom along with.
 2. **Determinisztikus Elemzo es Graf Okoszisztema**: Nativ integracio a `py-tree-sitter` (AST parser), `networkx` (Tudasgraf) es `docker` (Python SDK) konyvtarakkal.
 3. **Adatstruktura Validacio**: `pydantic` v2 a szigoru tipusellenorzeshez es JSON semak automatikus eloallitasahoz az LLM-ek szamara.
 
@@ -17,7 +17,7 @@ Az Orchestrator Core es az MCP Szerver nyelve: **Python 3.12+**.
 
 ## 2. Adatbazis es Tarolasi Architektura
 
-Az AI-OS hibrid tarolasi modellt alkalmaz a sebesseg es az alacsony konfiguracios igeny erdekeben:
+Az AI-OS hibrid tarolasi modellt alkalmaz a sebesseg and the alacsony konfiguracios igeny erdekeben:
 
 ```mermaid
 graph TD
@@ -98,7 +98,7 @@ services:
 
 ---
 
-## 4. Kommunikacios Protokollok es API Endpointok
+## 4. Kommunikacios Protokollok es API Vegpontok
 
 Az Orchestrator haromfele interfeszt biztosit: **MCP JSON-RPC**, **FastAPI REST API**, es **WebSockets**.
 
@@ -110,26 +110,26 @@ graph LR
 ```
 
 ### 4.1. MCP Szerver Interfesz (JSON-RPC 2.0 over SSE / Stdio)
-- **SSE Endpoint**: `GET /mcp/sse` (Server-Sent Events kapcsolat letesitese az LLM agensekkel)
-- **Message Endpoint**: `POST /mcp/messages` (JSON-RPC tool hivasok fogadasa)
+- **SSE Vegpont**: `GET /mcp/sse` (Server-Sent Events kapcsolat letesitese az LLM agensekkel)
+- **Message Vegpont**: `POST /mcp/messages` (JSON-RPC tool hivasok fogadasa)
 
 ---
 
-### 4.2. REST API Endpointok (`FastAPI`)
+### 4.2. REST API Vegpontok (`FastAPI`)
 
-| Method | Endpoint | Description / Function |
+| Metodus | Vegpont | Leiras / Funkcio |
 | :--- | :--- | :--- |
-| `POST` | `/api/v1/epics` | Uj useri keres felvetele es DAG tervezes elinditasa. |
+| `POST` | `/api/v1/epics` | Uj felhasznaloi keres felvetele es DAG tervezes elinditasa. |
 | `GET` | `/api/v1/dags/{dag_id}` | Az aktualis DAG graf allapotanak es feladat-nodejainak lekerese. |
 | `GET` | `/api/v1/locks` | Aktiv fajl zarolasok (`Read-Set` / `Write-Set`) lekerese. |
 | `GET` | `/api/v1/metrics/cost` | Osszesitett token-fogyasztas es dollarkoltseg lekerdezese. |
-| `POST` | `/api/v1/tasks/{task_id}/retry` | **HITL**: Sikertelen feladat ujraiditasa egyedi developer instrukcioval. |
-| `POST` | `/api/v1/tasks/{task_id}/resume` | **HITL**: Kezi kodmodositas jovahagyasa es a feladat tovabbengedese. |
+| `POST` | `/api/v1/tasks/{task_id}/retry` | **HITL**: Sikertelen feladat ujraiditasa egyedi fejlesztoi instrukcioval. |
+| `POST` | `/api/v1/tasks/{task_id}/resume` | **HITL**: Kezi kodmodositas jovahagyasa and the feladat tovabbengedese. |
 
 ---
 
-### 4.3. WebSocket Endpoint (Valos Ideju Esemenyek)
-- **Endpoint**: `WS /api/v1/ws/events`
+### 4.3. WebSocket Vegpont (Valos Ideju Esemenyek)
+- **Vegpont**: `WS /api/v1/ws/events`
 - **Payload Pelda (Task Allapotvaltozas & Log Streaming)**:
 ```json
 {
@@ -149,7 +149,7 @@ graph LR
 
 ---
 
-## 5. Python Rendszermag Bestepi Pont Blueprint (`main.py`)
+## 5. Python Rendszermag Belepesi Pont Blueprint (`main.py`)
 
 ```python
 import asyncio

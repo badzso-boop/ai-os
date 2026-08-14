@@ -1,6 +1,6 @@
 # 08. Knowledge Graph Schema & Subgraph Extraction Algorithms
 
-This document is the **AI-OS Knowledge & Context Engine** melyszintu specification. Kidolgozza a Tudasgraf (Knowledge Graph) grafadatbazis semajat, a $k$-hop szomszedsagi kinyero algoritmust, a tomoritett kodvazak (Skeleton Stubs) automatikus generalasat, valamint a Python nyelven megirt teljes referencia-implementaciot.
+This document is the **AI-OS Knowledge & Context Engine** melyszintu specifikacioja. Kidolgozza a Tudasgraf (Knowledge Graph) grafadatbazis semajat, a $k$-hop szomszedsagi kinyero algoritmust, a tomoritett kodvazak (Skeleton Stubs) automatikus generalasat, as well as a Python nyelven megirt teljes referencia-implementaciot.
 
 ---
 
@@ -55,7 +55,7 @@ classDiagram
 
 ### 1.2. Elek (Edges) Specifikacioja
 
-| Edge Type | Source ➔ Target | Description / Attributes |
+| El Tipusa (Edge) | Forras (Source) ➔ Cel (Target) | Leiras / Attributumok |
 | :--- | :--- | :--- |
 | `CONTAINS` | `FileNode ➔ ClassNode / FunctionNode` | Fajlstruktura tagsag |
 | `IMPORTS` | `FileNode A ➔ FileNode B` | Statikus import fuggoseg (`imported_symbols`) |
@@ -89,7 +89,7 @@ graph TD
     classDef pruned fill:#eee,stroke:#ccc,color:#aaa;
 ```
 
-### Algoritmus Stepei:
+### Algoritmus Lepesei:
 
 1. **Magcsomopontok (Seed Nodes) beallitasa**:
    - A feladat `write_set` es `read_set` fajljaihoz tartozo `FileNode`, `ClassNode` es `FunctionNode` elemek.
@@ -140,7 +140,7 @@ export class UserRepository {
 
 ## 4. Python Implementacios Blueprint (NetworkX + Skeleton Generator)
 
-Az alabbi Python modul tartalmazza a teljes tudasgraf epitest, a $k$-hop subgraph kinyerest es a kontextus csomagolot:
+Az alabbi Python modul tartalmazza a teljes tudasgraf epitest, a $k$-hop subgraph kinyerest and the kontextus csomagolot:
 
 ```python
 import networkx as nx
@@ -163,7 +163,7 @@ class KnowledgeEngine:
 
     def extract_context_subgraph(self, target_files: List[str], max_hops: int = 2) -> str:
         """
-        Kiszamitja a k-hop szomszedsagi grafot es generates a tomoritett Context Cache-t.
+        Kiszamitja a k-hop szomszedsagi grafot es eloallitja a tomoritett Context Cache-t.
         """
         extracted_nodes: Set[str] = set()
 
@@ -175,7 +175,7 @@ class KnowledgeEngine:
             subgraph = nx.ego_graph(self.graph, target_file, radius=max_hops, undirected=False)
             extracted_nodes.update(subgraph.nodes())
 
-        # Tomoritett kontextus szoveg generation
+        # Tomoritett kontextus szoveg eloallitasa
         context_blocks: List[str] = []
         visited_files: Set[str] = set()
 

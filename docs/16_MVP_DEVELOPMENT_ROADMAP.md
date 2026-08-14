@@ -1,6 +1,6 @@
 # 16. AI-OS MVP Development Roadmap & Testing Plan
 
-This document is the **AI-OS 4-Fazisu Developmenti Utemtervenek (MVP Roadmap)** es Tesztelesi Strategiajanak detailed specification.
+This document is the **AI-OS 4-Fazisu Fejlesztesi Utemtervenek (MVP Roadmap)** es Tesztelesi Strategiajanak reszletes specifikacioja.
 
 ---
 
@@ -39,7 +39,7 @@ graph LR
 
 ## 📌 2. Fazis: Rendszermag, Zarolas es Git Izolacio (Orchestrator Core & Git Engine)
 
-> **Fokusz**: Parhuzamos feladat-vegrehajtas, adatkonfliktus-saveseg es adatbazis perzisztencia.
+> **Fokusz**: Parhuzamos feladat-vegrehajtas, adatkonfliktus-mentesseg es adatbazis perzisztencia.
 
 ### Megvalositando Modulok:
 - **`ai_os/core/lock_manager.py`**:
@@ -78,9 +78,9 @@ graph LR
 
 ---
 
-## 📌 4. Fazis: Glass Box Web UI es HITL Integracio (Vezerlo Interface & HITL)
+## 📌 4. Fazis: Glass Box Web UI es HITL Integracio (Vezerlo Felulet & HITL)
 
-> **Fokusz**: Valos ideju developer atlathatosag es interaktiv jovahagyasi munkafolyamat.
+> **Fokusz**: Valos ideju fejlesztoi atlathatosag es interaktiv jovahagyasi munkafolyamat.
 
 ### Megvalositando Modulok:
 - **`ai_os/main.py` & `ws_manager`**:
@@ -88,10 +88,10 @@ graph LR
 - **`ui/src/components/DagCanvas.tsx`**:
   - React Flow interaktiv DAG feladat-graf vizualizacio.
 - **`ui/src/components/HitlDrawer.tsx`**:
-  - **Stage 1 Plan Review**: A DAG vegrehajtas automatikus megallitasa `PLAN_REVIEW` allapotban a developer jovahagyasaig.
+  - **Stage 1 Plan Review**: A DAG vegrehajtas automatikus megallitasa `PLAN_REVIEW` allapotban a fejleszto jovahagyasaig.
   - **Stage 2 Runtime Preemption**: "Pause / Kozbeszolas" gomb.
-  - **Stage 3 Monaco Editor**: Beepitett VS Code kod-szerkeszto a interfaceen a sikertelen tesztek kezi javitasahoz es felulbiralasahoz.
+  - **Stage 3 Monaco Editor**: Beepitett VS Code kod-szerkeszto a feluleten a sikertelen tesztek kezi javitasahoz es felulbiralasahoz.
 
 ### 🧪 4. Fazis Tesztelesi Kriteriumok:
-- [x] Uj Epic inditasakor a interface megallitja a folyamatot, amig a developer rakattint az "Approve & Execute DAG" gombra.
+- [x] Uj Epic inditasakor a felulet megallitja a folyamatot, amig a fejleszto rakattint az "Approve & Execute DAG" gombra.
 - [x] Manualis kodmodositas utan a UI-rol futtatott teszt sikere in case of a DAG automatikusan folytatodik.

@@ -1,6 +1,6 @@
 # 09. Git Worktree & Merge/Rebase Staging Engine Spec
 
-This document is the **AI-OS Git Worktree & Merge Staging Engine** melyszintu specification. Kidolgozza a parhuzamos agensek fajlrendszer-izolaciojat, a Git Worktree dinamikus eletciklusat, az aszinkron Merge Queue operation, a Rebase/Pre-merge re-validaciot, valamint az automata Git-konfliktus feloldast.
+This document is the **AI-OS Git Worktree & Merge Staging Engine** melyszintu specifikacioja. Kidolgozza a parhuzamos agensek fajlrendszer-izolaciojat, a Git Worktree dinamikus eletciklusat, az aszinkron Merge Queue operation, a Rebase/Pre-merge re-validaciot, as well as az automata Git-konfliktus feloldast.
 
 ---
 
@@ -66,7 +66,7 @@ Amikor tobb agens fut parhuzamosan (pl. `TASK-101` es `TASK-102`), elofordulhat,
 ### A Staging Engine Rebase & Re-validation Szabalya:
 
 1. **`TASK-101` befejezi a munkat**: Atmegy a teszteken ➔ beolvad a `main` agba (`git merge --ff-only`).
-2. **`TASK-102` befejezi a munkat**: Mielott a `main`-be olvadna, a Staging Engine eszleli, hogy a `main` ag elorelepett!
+2. **`TASK-102` befejezi a munkat**: Mielott a `main`-be olvadna, a Staging Engine eszleli, that the `main` ag elorelepett!
 3. **Automata Rebase & Ujravalidacio**:
    - A Staging Engine vegrehajt egy `git rebase main` parancsot a `TASK-102` worktree-jeben.
    - **Ujra-futtatja a Docker konteneres tesztet** a frissitett kodallapoton.
@@ -109,7 +109,7 @@ Use the `propose_file_patch` tool to save the resolved file.
 
 ## 5. Python Implementacios Blueprint (GitStagingEngine)
 
-Az alabbi Python osztaly kezeli a Worktree staging-et, a rebase felugyeletet es a biztonsagos merge-et:
+Az alabbi Python osztaly kezeli a Worktree staging-et, a rebase felugyeletet and the biztonsagos merge-et:
 
 ```python
 import subprocess

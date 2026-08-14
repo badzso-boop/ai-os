@@ -1,22 +1,22 @@
 # 21. Static Subdomain Deploy Pipeline — `deploy_static.sh`
 
-> **Status: Design Document.** NOT YET implemented. Ez a
+> **Statusz: design document (design doc).** NOT YET implemented. Ez a
 > dokumentum egy **determinisztikus deploy-scriptet** tervez, ami egy statikus
 > bundle-t (jellemzoen az `ai-os startup` kimenetet, 20. doc) egy izolalt Docker
 > nginx-kontenerbe rakva elove tesz egy subdomainen, a MEGLEVO Cloudflare Tunnel
 > + host nginx infrastruktura mogott.
 >
-> ⚠️ **Ez a modul kozvetlenul erinti Norbert ELO, MEGOSZTOTT otthoni szerveret**,
+> ⚠️ **This module kozvetlenul erinti Norbert ELO, MEGOSZTOTT otthoni szerveret**,
 > ami `ujjweb.hu`-t es sok mas valos projektet/ugyfel-oldalt szolgal ki EGYETLEN
 > Cloudflare Tunnel + host nginx mogott. A dokumentum kozponti tervezesi elve
 > ezert: **additiv-only, izolalt, idempotens, visszavonhato, es soha nem nyul
 > megosztott konfig-blokkokhoz.** Lasd a globalis `~/.claude/CLAUDE.md` szabalyait
-> es a `homelab-shared-server-context` / `feedback-cautious-shared-infra` /
+> and the `homelab-shared-server-context` / `feedback-cautious-shared-infra` /
 > `server-freeze-investigation` memoriakat.
 
 ---
 
-## 0. ⚠️ The Shared Server — Non-negotiable Rules
+## 0. ⚠️ A megosztott szerver — a nem-alkudhato szabalyok
 
 Mielott barmi masrol szo esne, ezek a kobe vesett korlatok. A script tervenek
 minden dontese ezekbol kovetkezik:
@@ -48,18 +48,18 @@ minden dontese ezekbol kovetkezik:
    megmutatja pontosan MIT csinalna (milyen fajlt ir, milyen kontenert indit,
    reload-ol-e), mielott barmit tenne. Eles muvelet emberi megerositeshez kotott.
 8. **Az AI soha nem futtatja ezt kozvetlenul.** Az `ai-os startup` (vagy a
-   user) hivja meg a scriptet parameterrel; az LLM nem ad ki docker/nginx/
+   felhasznalo) hivja meg a scriptet parameterrel; az LLM nem ad ki docker/nginx/
    cloudflared parancsot (kontextus-koltseg ES biztonsag — egy determinisztikus,
    auditalhato script sokkal vedhetobb egy live szerveren, mint egy AI ad-hoc
    parancsai).
 
 ---
 
-## 1. Why a Script, Not an AI Tool?
+## 1. Miert script, es nem AI-tool?
 
-- **Kontextus-koltseg.** A deploy sok apro, olvasas-nehez step (port kereses,
+- **Kontextus-koltseg.** A deploy sok apro, olvasas-nehez lepes (port kereses,
   config-iras, health-check, registry). Ha ezt az AI tool-hivasokkal csinalna,
-  rengeteg tokent es tool-round-tripet enne — feleslegesen, hisz a stepek
+  rengeteg tokent es tool-round-tripet enne — feleslegesen, hisz a lepesek
   **determinisztikusak**.
 - **Determinizmus & auditalhatosag.** Egy verziozott shell-script pontosan
   ugyanazt csinalja minden futaskor; git-diffelheto, reviewelheto, tesztelheto.
@@ -71,7 +71,7 @@ minden dontese ezekbol kovetkezik:
 
 ---
 
-## 2. Request Architecture & Flow
+## 2. A keres utja (architektura)
 
 ```
 [Bongeszo: https://freshbox.apps.ujjweb.hu]
@@ -119,8 +119,8 @@ Ezt **egyszer** kell megcsinalni, tudatosan, a megosztott infra ismereteben
    hasznalatara tartjuk fenn, es egy **port-tartomanyt** (pl. `39000–39999`) is,
    amit mas projekt nem hasznal.
 
-Ezt a stept a script **nem** vegzi el magatol — legfeljebb egy kulon `deploy_
-setup_check.sh` ellenorzi, hogy a wildcard + tartomany rendben van-e, es
+Ezt a lepest a script **nem** vegzi el magatol — legfeljebb egy kulon `deploy_
+setup_check.sh` ellenorzi, that the wildcard + tartomany rendben van-e, es
 figyelmeztet, ha nincs. Az elo szerveren a megosztott config elso beallitasa
 mindig tudatos, reviewelt emberi muvelet (a globalis CLAUDE.md according to:
 „investigate what else depends on it first and prefer additive changes").
@@ -136,7 +136,7 @@ restart) modon, dokumentalt rollbackkal.
 
 ---
 
-## 3. The Deploy Script — `scripts/deploy_static.sh`
+## 3. A deploy script — `scripts/deploy_static.sh`
 
 ### 3.1. Parameterek
 
@@ -150,7 +150,7 @@ deploy_static.sh --subdomain <nev> --dir <statikus-bundle-utvonal>
 deploy_static.sh --list                      # az AI-OS deployok listaja (registry)
 ```
 
-### 3.2. Stepek (eles futas)
+### 3.2. Lepesek (eles futas)
 
 1. **Bemenet-validalas.**
    - `subdomain`: szigoru regex (`^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$`), kisbetu,
@@ -213,7 +213,7 @@ deploy_static.sh --list                      # az AI-OS deployok listaja (regist
    → 200-at kell adnia. Sikertelenseg in case of rollback (4–5. visszavonasa).
 7. **Registry-bejegyzes.** `~/.ai-os/deploys.json` (az `AI_OS_HOME` ala, mint a
    `projects.json`): `{subdomain, port, container, site_file, dir, url, created_at}`
-   — a `--list` es a `--teardown` innen dolgozik.
+   — a `--list` and the `--teardown` innen dolgozik.
 8. **Kiirja az elo URL-t:** `https://<sub>.apps.ujjweb.hu`.
 
 ### 3.3. Idempotencia es rollback
@@ -222,9 +222,9 @@ deploy_static.sh --list                      # az AI-OS deployok listaja (regist
   atomikusan csereli (a mount ugyanaz a konyvtar; uj tartalom = a fajlok csereje,
   a kontener ujrainditasa nem is kell, mert a mount elo — vagy egy gyors
   `docker restart` a namespaced kontenerre). A site-fajl valtozatlan.
-- **Rollback minden stepre.** Ha barmelyik step bukik, a script visszacsinalja
+- **Rollback minden lepesre.** Ha barmelyik lepes bukik, a script visszacsinalja
   az addigiakat (site-fajl torles, kontener stop/rm, registry-visszaallitas) —
-  ugy, hogy a **host mindig konzisztens** maradjon. A kritikus invarians: **rossz
+  ugy, that the **host mindig konzisztens** maradjon. A kritikus invarians: **rossz
   nginx-config sosem kerul reload-ra** (a `nginx -t` kapu miatt), tehat egy hibas
   deploy nem viheti le a tobbi oldalt.
 
@@ -244,21 +244,21 @@ deploy_static.sh --list                      # az AI-OS deployok listaja (regist
 
 ---
 
-## 4. Port Allocation and Registry
+## 4. Port-allokacio es registry
 
 - **Fenntartott tartomany:** `39000–39999` (konfiguralhato), amit mas projekt nem
   hasznal a hoston. A tartomany fixalasa egyszeri, dokumentalt dontes.
 - **Registry:** `~/.ai-os/deploys.json`, atomikus iras (tempfile + `os.replace`),
   a `registry.py` mintajara. Ez a single-source-of-truth a port↔subdomain
-  lekepezesrol, a teardownrol es a listazasrol.
-- **Utkozes-vedelem:** foglalaskor a script a registry ES az elo portok
+  lekepezesrol, a teardownrol and the listazasrol.
+- **Utkozes-vedelem:** foglalaskor a script a registry and the elo portok
   (`ss -ltn`) uniojat nezi, hogy soha ne foglaljon elo portot.
 
 ---
 
-## 5. Security Checklist (For Every Production Run)
+## 5. Biztonsagi checklista (a script minden eles futasara)
 
-A script inditaskor ellenorzi es a `--dry-run` kiirja:
+A script inditaskor ellenorzi and the `--dry-run` kiirja:
 
 - [ ] a subdomain a fenntartott **wildcard zonaban** van (nem a gyoker-domainen,
       nem egy kezzel kezelt subdomainen)
@@ -274,22 +274,22 @@ A script inditaskor ellenorzi es a `--dry-run` kiirja:
 Amit a script **SOHA nem tehet**: meglevo nginx/cloudflared blokk szerkesztese,
 nginx/cloudflared **restart**, `0.0.0.0`-ra publikalas, root kontener, a
 fenntartott zonan/tartomanyon kivuli objektum letrehozasa, a megosztott tunnel-
-config per-deploy modositasa (wildcard mellett nincs is ra szukseg).
+config per-deploy modositasa (wildcard along with nincs is ra szukseg).
 
 ---
 
-## 6. Integration with `ai-os startup`
+## 6. Integracio az `ai-os startup`-pal
 
 Az `ai-os startup --subdomain <nev>` a sikeres validacio utan **egyetlen script-
 hivast** tesz: `deploy_static.sh --subdomain <nev> --dir <bundle>`. Az AI ezen a
 ponton kilep a kepbol — nem lat, nem futtat infra-parancsot. A script kimenete
-(az elo URL vagy a hiba) visszakerul a CLI-be. Ez a responsible forseg-elvalasztas a
+(az elo URL vagy a hiba) visszakerul a CLI-be. Ez a felelosseg-elvalasztas a
 lenyeg: **az AI statikus fajlokat gyart; a determinisztikus, hardened script
 deployol; az ember (HITL preview) engedelyez.**
 
 ---
 
-## 7. Security Rationale for Shared Server
+## 7. Miert biztonsagos ez a live megosztott szerveren — osszefoglalva
 
 | Kockazat | Hogyan zarjuk ki |
 | -------- | ---------------- |
@@ -303,7 +303,7 @@ deployol; az ember (HITL preview) engedelyez.**
 
 ---
 
-## 8. Future Extensions
+## 8. Jovobeli kiterjesztesek
 
 - **TTL / auto-lejarat.** A demo-subdomainek automatikus lebontasa N nap utan a
   registry `created_at`-ja based on (egy `deploy_static.sh --gc` a crontabban —
@@ -320,7 +320,7 @@ deployol; az ember (HITL preview) engedelyez.**
 
 ---
 
-## Related Documents
+## Kapcsolodo dokumentumok
 
 - `20_STARTUP_GENERATOR.md` — az `ai-os startup`, ami ezt a scriptet meghivja.
 - `11_ORCHESTRATOR_TECH_STACK_AND_DEPL.md` — az AI-OS sajat deploy/tech-stack
