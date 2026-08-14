@@ -206,3 +206,17 @@ def test_cli_startup_detailed_stdout_summary(tmp_path: Path) -> None:
     assert "Pages:" in result.output
     assert "Core Flow:" in result.output
     assert "Brand / Tone:" in result.output
+
+
+def test_cli_init_startup_stack(tmp_path: Path) -> None:
+    """Test ai-os init command with --stack startup succeeds without KeyError."""
+    runner = CliRunner()
+    proj_dir = tmp_path / "my_startup"
+
+    result = runner.invoke(main, ["init", str(proj_dir), "--stack", "startup"])
+
+    assert result.exit_code == 0
+    assert "Scaffolded" in result.output
+    assert "startup" in result.output
+    assert "--language javascript" in result.output
+    assert (proj_dir / "index.html").exists()

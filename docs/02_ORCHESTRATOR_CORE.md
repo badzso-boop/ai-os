@@ -1,70 +1,70 @@
 # 02. Orchestrator Core Specification
 
-Az **Orchestrator Core** az AI-OS központi vezérlőegysége. Python 3.12+ nyelven íródott, és aszinkron eseményhurkot (`asyncio`) használ a nagyfokú párhuzamosíthatóság és alacsony válaszidő érdekében.
+The **Orchestrator Core** is the central control unit of AI-OS. Written in Python 3.12+, it utilizes an asynchronous event loop (`asyncio`) for high concurrency and low latency.
 
 ---
 
-## 1. DAG Planner (Tervező Modul)
+## 1. DAG Planner (Planner Module)
 
-A **DAG Planner** felelős a felhasználó által megadott magas szintű kérések (Epic / User Story) felbontásáért atomi feladatokra (Tasks), valamint ezekből egy **Directed Acyclic Graph (DAG)** felépítéséért.
+The **DAG Planner** is responsible for decomposing high-level user requests (Epic / User Story) into atomic tasks (Tasks) and building a **Directed Acyclic Graph (DAG)** from them.
 
-### 1.1. Feladat Csomó (Task Node) Struktúra
-Minden feladatcsomó az alábbi attribútumokkal rendelkezik:
+### 1.1. Task Node Structure
+Every task node contains the following attributes:
 
 ```python
 from pydantic import BaseModel, Field
 from typing import List, Set, Optional, Literal
 
 class TaskNode(BaseModel):
-    id: str = Field(..., description="Egyedi feladat azonosító (pl. TASK-001)")
+    id: str = Field(..., description="Unique task identifier (e.g. TASK-001)")
     title: str
     description: str
     risk_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-    target_files: List[str] = Field(..., description="Érintett fájlok listája")
-    read_set: Set[str] = Field(default_factory=set, description="Olvasási zárolás alá eső fájlok")
-    write_set: Set[str] = Field(default_factory=set, description="Írási zárolás alá eső fájlok")
-    dependencies: List[str] = Field(default_factory=list, description="Szülő feladat azonosítók")
+    target_files: List[str] = Field(..., description="List of affected files")
+    read_set: Set[str] = Field(default_factory=set, description="Files subject to read locks")
+    write_set: Set[str] = Field(default_factory=set, description="Files subject to write locks")
+    dependencies: List[str] = Field(default_factory=list, description="Parent task identifiers")
     status: Literal["PENDING", "READY", "RUNNING", "COMPLETED", "FAILED", "BLOCKED"] = "PENDING"
     max_retries: int = 3
     retry_count: int = 0
 ```
 
-### 1.2. Topológiai Sorrend és Ciklusdetektálás
-A DAG Planner a `networkx` könyvtárat használja a feladatfüggőségi gráf kezelésére:
-- A ciklikus függőségeket a kódgenerálás előtt detektálja és visszadobja a Planner LLM-nek korrigálásra (`networkx.is_directed_acyclic_graph`).
-- A végrehajtás topológiai sorrendben (`topological_sort`) vagy függőségi szintenkénti párhuzamosítással történik.
+### 1.2. Topological Sorting and Cycle Detection
+The DAG Planner uses the `networkx` library to manage the task dependency graph:
+- Cyclic dependencies are detected before code generation and returned to the Planner LLM for correction (`networkx.is_directed_acyclic_graph`).
+- Execution proceeds in topological order (`topological_sort`) or via parallelization across dependency levels.
 
 ---
 
-## 2. Dynamic Scheduler (Ütemező Modul)
+## 2. Dynamic Scheduler (Scheduler Module)
 
-A **Dynamic Scheduler** felelős a `READY` állapotú feladatok kiosztásáért a legoptimálisabb AI modellhez (MCP Adapter).
+The **Dynamic Scheduler** is responsible for dispatching `READY` tasks to the optimal AI model (MCP Adapter).
 
-### 2.1. Modell Kiválasztási Mátrix (Cost & Risk Awareness)
+### 2.1. Model Selection Matrix (Cost & Risk Awareness)
 
-A rendszer a feladat kockázati szintje és a módosítandó réteg alapján választ modellt:
+The system selects a model based on the task risk level and the target component layer:
 
-| Risk Level | Feladat Típusa | Ajánlott AI Modell | Költség / Token Profil |
+| Risk Level | Task Type | Recommended AI Model | Cost / Token Profile |
 | :--- | :--- | :--- | :--- |
-| **LOW** | CSS/Style igazítások, dokumentáció frissítés, triviális unit tesztek | Gemini 1.5 Flash / DeepSeek V3 | Extremely Low Cost |
-| **MEDIUM** | Új UI komponens, meglévő függvény refaktorálása, bugfix | GPT-4o-mini / Claude 3.5 Haiku | Low/Medium Cost |
-| **HIGH** | Új API végpont, adatbázis séma módosítás, üzleti logika | Claude 3.5 Sonnet / GPT-4o | Premium Model |
-| **CRITICAL** | Architektúra váltás, biztonsági modul, komplex algoritmikus DAG | Claude 3.5 Sonnet (High Temp/Reasoning) | Maximum Reasoning |
+| **LOW** | CSS/Style adjustments, documentation updates, trivial unit tests | Gemini 1.5 Flash / DeepSeek V3 | Extremely Low Cost |
+| **MEDIUM** | New UI component, existing function refactoring, bugfix | GPT-4o-mini / Claude 3.5 Haiku | Low/Medium Cost |
+| **HIGH** | New API endpoint, database schema modification, business logic | Claude 3.5 Sonnet / GPT-4o | Premium Model |
+| **CRITICAL** | Architectural shift, security module, complex algorithmic DAG | Claude 3.5 Sonnet (High Temp/Reasoning) | Maximum Reasoning |
 
-### 2.2. Terhelés- és Kóta-Kezelés (Rate Limiting)
-- A Scheduler nyomon követi a meglévő API kulcsok **TPM (Token Per Minute)** és **RPM (Request Per Minute)** korlátait.
-- Ha egy prémium modell elérte a limitet, a Scheduler feladat-várakoztatást (Backoff) léptet életbe, vagy átirányítja a feladatot egy egyenértékű tartalék (fallback) modellhez.
+### 2.2. Rate Limiting and Quota Management
+- The Scheduler tracks **TPM (Token Per Minute)** and **RPM (Request Per Minute)** limits of configured API keys.
+- If a premium model reaches its quota limit, the Scheduler enforces task backoff or redirects the task to an equivalent fallback model.
 
 ---
 
-## 3. Lock Manager (Párhuzamossági Zárolás Kezelő)
+## 3. Lock Manager (Concurrency Lock Manager)
 
-A több ágens általi egyidejű kódmódosítás és a Merge Konfliktusok elkerülése érdekében az AI-OS egy **Granuláris Fájl Zároló Rendszert** alkalmaz.
+To prevent simultaneous code modifications by multiple agents and avoid merge conflicts, AI-OS employs a **Granular File Locking System**.
 
-### 3.1. Read Set / Write Set Szabályok
-Minden feladat deklarálja a hozzáférési igényét:
-- **Shared Read Lock (`read_set`)**: Több feladat is olvashatja ugyanazt a fájlt egyidejűleg.
-- **Exclusive Write Lock (`write_set`)**: Egy fájlt egy adott pillanatban csak egyetlen aktív feladat módosíthat (`write_set`).
+### 3.1. Read Set / Write Set Rules
+Every task declares its access requirements:
+- **Shared Read Lock (`read_set`)**: Multiple tasks can read the same file simultaneously.
+- **Exclusive Write Lock (`write_set`)**: A file can only be modified by a single active task at any given moment (`write_set`).
 
 ```python
 import asyncio
@@ -79,12 +79,12 @@ class LockManager:
     async def acquire_locks(self, task_id: str, read_set: Set[str], write_set: Set[str]) -> bool:
         async with self._lock_condition:
             while True:
-                # Ellenőrizzük, hogy bármelyik write_set fájl zárolva van-e (akár olvasásra, akár írásra)
+                # Verify if any write_set file is locked (for reading or writing)
                 write_conflict = any(f in self._write_locks or self._read_locks.get(f, 0) > 0 for f in write_set)
                 read_conflict = any(f in self._write_locks for f in read_set)
                 
                 if not write_conflict and not read_conflict:
-                    # Zárolások lefoglalása
+                    # Acquire locks
                     for f in read_set:
                         self._read_locks[f] = self._read_locks.get(f, 0) + 1
                     for f in write_set:
@@ -105,5 +105,6 @@ class LockManager:
             self._lock_condition.notify_all()
 ```
 
-### 3.2. Párhuzamos Végrehajtás Git Worktrees Segítségével
-Amennyiben két független feladat Write Set-je diszjunkt (`TaskA.write_set ∩ TaskB.write_set = ∅`), a Lock Manager engedélyezi a két feladat **párhuzamos futtatását** külön Git Worktree környezetben.
+### 3.2. Parallel Execution via Git Worktrees
+If the Write Sets of two independent tasks are disjoint (`TaskA.write_set ∩ TaskB.write_set = ∅`), the Lock Manager permits **parallel execution** of both tasks in isolated Git Worktree environments.
+

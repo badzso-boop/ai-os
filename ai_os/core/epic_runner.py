@@ -482,14 +482,15 @@ class EpicRunner:
                     head=branch, base=self.pr_base_branch, title=title, body=body
                 )
                 return
-            except Exception:
-                # PR creation failed (auth, network, existing PR, …) — don't lose
-                # the work; fall through to the local merge below.
-                pass
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to create pull request for integration branch '{branch}': {exc}"
+                ) from exc
 
-        # Fallback: merge the integration branch into the base branch locally.
+        # Fallback: merge the integration branch into the base branch locally when no remote/gh.
         await self.staging.merge_branch_ff(branch, target=self.pr_base_branch)
         result.merged_to_main = True
+
 
     def _build_pr_content(self, result: EpicRunResult, tasks: list[TaskNode]) -> tuple[str, str]:
         """Build the PR title + Markdown body — including the decomposed DAG as a
