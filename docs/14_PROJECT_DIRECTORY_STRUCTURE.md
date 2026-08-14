@@ -1,10 +1,10 @@
 # 14. Project Directory Layout & Package Blueprint
 
-Ez a dokumentum az **AI-OS Repository Könyvtárstruktúrájának és Modul-Elrendezésének** teljes specifikációja.
+This document is the complete specification for the **AI-OS Repository Directory Structure and Module Layout**.
 
 ---
 
-## 1. Teljes Könyvtárstruktúra (Repository Layout)
+## 1. Full Directory Layout (Repository Layout)
 
 ```
 ai-os/
@@ -81,7 +81,7 @@ ai-os/
 
 ---
 
-## 2. Python Függőségek Specifikációja (`pyproject.toml`)
+## 2. Python Fuggosegek Specifikacioja (`pyproject.toml`)
 
 ```toml
 [build-system]

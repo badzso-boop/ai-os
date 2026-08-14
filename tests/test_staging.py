@@ -272,3 +272,32 @@ async def test_final_checkout_merge_git_error_returns_false(git_repo, monkeypatc
     assert result is False
     assert (git_repo / ".ai-os" / "worktrees" / "TASK-I").exists()
 
+
+async def test_concurrent_pre_validation(git_repo):
+    import asyncio
+    engine = GitStagingEngine(git_repo)
+    wt_a = await engine.create_worktree("TASK-CONC-A")
+    wt_b = await engine.create_worktree("TASK-CONC-B")
+
+    (wt_a / "file_a.txt").write_text("from conc A\n")
+    (wt_b / "file_b.txt").write_text("from conc B\n")
+
+    validation_started = []
+
+    async def slow_validator(wt_path: Path) -> bool:
+        validation_started.append(wt_path.name)
+        await asyncio.sleep(0.1)
+        return True
+
+    # Launch both stage_and_merge_task calls concurrently
+    res_a, res_b = await asyncio.gather(
+        engine.stage_and_merge_task("TASK-CONC-A", "add file_a", slow_validator),
+        engine.stage_and_merge_task("TASK-CONC-B", "add file_b", slow_validator),
+    )
+
+    assert res_a is True
+    assert res_b is True
+    # Initial validation starts for both before any merge lock is acquired, then second task re-validates after rebase
+    assert validation_started[:2] == ["TASK-CONC-A", "TASK-CONC-B"] or validation_started[:2] == ["TASK-CONC-B", "TASK-CONC-A"]
+    assert len(validation_started) == 3 or len(validation_started) == 4
+

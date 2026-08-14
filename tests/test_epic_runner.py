@@ -298,6 +298,44 @@ async def test_pr_mode_opens_pr_when_remote_and_gh(git_repo: Path, tmp_path: Pat
     assert result.integration_branch in branches
 
 
+async def test_pr_mode_raises_when_pr_creation_fails(git_repo: Path, tmp_path: Path, monkeypatch):
+    # When gh and remote exist, but `open_pull_request` fails (e.g. auth/network error),
+    # EpicRunner must raise an error instead of silently falling back to a direct merge to main.
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=git_repo, check=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=git_repo, check=True)
+
+    import pytest
+    import ai_os.core.epic_runner as er
+
+    monkeypatch.setattr(er.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+
+    async def fake_open_pr_fail(self, head, base, title, body):
+        raise RuntimeError("gh: GraphQL error: Pull request already exists")
+
+    monkeypatch.setattr(er.GitStagingEngine, "open_pull_request", fake_open_pr_fail)
+
+    runner = EpicRunner(
+        repo_root=git_repo,
+        scheduler=DynamicScheduler(ProtocolRouter({"gemini": _FilePerTaskAdapter()}), environ={}),
+        adapters={"gemini": _FilePerTaskAdapter()},
+        language="python",
+        sandbox_runner=_AlwaysPassSandbox(),
+    )
+    with pytest.raises(RuntimeError, match="Failed to create pull request"):
+        await runner.run_epic([_task("A")])
+
+    # Direct merge to main must NOT have occurred
+    current_branch = subprocess.run(["git", "branch", "--show-current"], cwd=git_repo, capture_output=True, text=True).stdout.strip()
+    assert current_branch == runner.staging.base_branch
+    # Check that main branch does not contain A.py
+    show_main_file = subprocess.run(["git", "show", "main:A.py"], cwd=git_repo, capture_output=True, text=True)
+    assert show_main_file.returncode != 0
+
+
+
+
 class _UsageLimitAdapter(BaseMCPAdapter):
     """Raises AgentUsageLimitError for the given task ids (or all if None) — the
     rest complete normally by writing `<task_id>.py`."""

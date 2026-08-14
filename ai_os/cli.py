@@ -184,7 +184,13 @@ def init(path: str, stack: str, with_db: bool, name: str | None) -> None:
         console.print(f"  ai-os epic run {reg_name} --prompt \"add a /users CRUD API with tests\" --language python")
         console.print(f"  ai-os epic run {reg_name} --prompt \"add a users list page\" --language typescript")
     else:
-        lang = {"fastapi": "python", "react": "typescript", "spring": "java", "next-prisma": "typescript"}[stack]
+        lang = {
+            "fastapi": "python",
+            "react": "typescript",
+            "spring": "java",
+            "next-prisma": "typescript",
+            "startup": "javascript",
+        }[stack]
         console.print(f"  ai-os epic run {reg_name} --prompt \"...\" --language {lang}")
 
 

@@ -1,50 +1,50 @@
 # 11. Orchestrator Tech Stack, Database & Deployment Spec
 
-Ez a dokumentum az **AI-OS Orchestrator Engine és MCP Szerver** technológiai megvalósításának, adatbázis-architektúrájának, Docker konténerizációjának és HTTP/WebSocket/MCP API végpontjainak teljességgel részletezett specifikációja.
+This document is the **AI-OS Orchestrator Engine es MCP Szerver** technologiai megvalositasanak, adatbazis-architekturajanak, Docker kontenerizaciojanak es HTTP/WebSocket/MCP API vegpontjainak teljesseggel reszletezett specification.
 
 ---
 
-## 1. Programozási Nyelv és Könyvtár-Stakk
+## 1. Programozasi Nyelv es Konyvtar-Stakk
 
-Az Orchestrator Core és az MCP Szerver nyelve: **Python 3.12+**.
+Az Orchestrator Core es az MCP Szerver nyelve: **Python 3.12+**.
 
-### Miért Python?
-1. **Aszinkron Concurrency**: Az `asyncio` lehetővé teszi több száz párhuzamos LLM hívás, háttérfolyamat (Git, Docker) és WebSocket kapcsolat nem-blokkoló kezelését alacsony memória-lábnyom mellett.
-2. **Determinisztikus Elemző és Gráf Ökoszisztéma**: Nativ integráció a `py-tree-sitter` (AST parser), `networkx` (Tudásgráf) és `docker` (Python SDK) könyvtárakkal.
-3. **Adatstruktúra Validáció**: `pydantic` v2 a szigorú típusellenőrzéshez és JSON sémák automatikus előállításához az LLM-ek számára.
+### Miert Python?
+1. **Aszinkron Concurrency**: Az `asyncio` lehetove teszi tobb szaz parhuzamos LLM hivas, hatterfolyamat (Git, Docker) es WebSocket kapcsolat nem-blokkolo kezeleset alacsony memoria-labnyom mellett.
+2. **Determinisztikus Elemzo es Graf Okoszisztema**: Nativ integracio a `py-tree-sitter` (AST parser), `networkx` (Tudasgraf) es `docker` (Python SDK) konyvtarakkal.
+3. **Adatstruktura Validacio**: `pydantic` v2 a szigoru tipusellenorzeshez es JSON semak automatikus eloallitasahoz az LLM-ek szamara.
 
 ---
 
-## 2. Adatbázis és Tárolási Architektúra
+## 2. Adatbazis es Tarolasi Architektura
 
-Az AI-OS hibrid tárolási modellt alkalmaz a sebesség és az alacsony konfigurációs igény érdekében:
+Az AI-OS hibrid tarolasi modellt alkalmaz a sebesseg es az alacsony konfiguracios igeny erdekeben:
 
 ```mermaid
 graph TD
     subgraph Storage & Database Layer
-        SQLite[(SQLite 3 WAL Mode)] -->|Perzisztens Állapot| CoreDB[Tasks, DAGs, Cost Metrics, Audit Logs]
+        SQLite[(SQLite 3 WAL Mode)] -->|Perzisztens Allapot| CoreDB[Tasks, DAGs, Cost Metrics, Audit Logs]
         NetworkX[In-Memory NetworkX Graph] -->|Graph Persistence| JSONGraph[JSON / SQLite Graph Table]
         AsyncQueue[AsyncIO Queue / Redis] -->|In-Memory Event Bus| LiveEvents[Real-time Events & Locks]
     end
 ```
 
-### 2.1. Elsődleges Relációs Adatbázis: **SQLite 3 (WAL Mode)**
-- **Költséghatékony és Zero-Config**: Nincs szükség külső adatbázis-szerver telepítésére lokális használat esetén.
-- **WAL (Write-Ahead Logging) Mód**: Magas párhuzamos olvasási és írási teljesítményt biztosít az aszinkron Python ORM-mel (`SQLAlchemy 2.0 async` / `aiosqlite`).
-- **Tárolt Adatok**:
-  - `epics` & `tasks`: DAG feladatok állapota (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `HITL`).
-  - `lock_audits`: Aktív és előző fájl zárolások története.
-  - `cost_metrics`: Használt tokenek száma modellcsoportonként és dollárköltség.
+### 2.1. Elsodleges Relacios Adatbazis: **SQLite 3 (WAL Mode)**
+- **Koltseghatekony es Zero-Config**: Nincs szukseg kulso adatbazis-szerver telepitesere lokalis hasznalat in case of.
+- **WAL (Write-Ahead Logging) Mod**: Magas parhuzamos olvasasi es irasi teljesitmenyt biztosit az aszinkron Python ORM-mel (`SQLAlchemy 2.0 async` / `aiosqlite`).
+- **Tarolt Adatok**:
+  - `epics` & `tasks`: DAG feladatok allapota (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `HITL`).
+  - `lock_audits`: Aktiv es elozo fajl zarolasok tortenete.
+  - `cost_metrics`: Hasznalt tokenek szama modellcsoportonkent es dollarkoltseg.
 
-### 2.2. Tudásgráf Tároló: **NetworkX + SQLite Csomópont Tár**
-- A Tudásgráf elsődlegesen a RAM-ban él (`NetworkX` irányított gráf) az ezredmásodperces $k$-hop lekérdezésekért.
-- Rendszerindításkor és fájlmódosításkor a gráf szerkezete elmentődik az SQLite `graph_nodes` és `graph_edges` tábláiba.
+### 2.2. Tudasgraf Tarolo: **NetworkX + SQLite Csomopont Tar**
+- A Tudasgraf elsodlegesen a RAM-ban el (`NetworkX` iranyitott graf) az ezredmasodperces $k$-hop lekerdezesekert.
+- Rendszerinditaskor es fajlmodositaskor a graf szerkezete elmentodik az SQLite `graph_nodes` es `graph_edges` tablaiba.
 
 ---
 
-## 3. Docker Konténerizáció és Telepítési Architektúra
+## 3. Docker Kontenerizacio es Telepitesi Architektura
 
-Az Orchestrator rendszermag saját magát is futtathatja egy elszeparált Docker Compose környezetben:
+Az Orchestrator rendszermag sajat magat is futtathatja egy elszeparalt Docker Compose kornyezetben:
 
 ```mermaid
 graph TD
@@ -63,7 +63,7 @@ graph TD
     UIContainer <-->|HTTP / WS| CoreContainer
 ```
 
-### `docker-compose.yml` Specifikáció:
+### `docker-compose.yml` Specifikacio:
 ```yaml
 version: '3.8'
 
@@ -77,8 +77,8 @@ services:
       - "8000:8000"   # REST & WebSocket API
       - "8001:8001"   # MCP Server SSE Port
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # Dinamikus konténer indítási jog
-      - .:/workspace                                # Gazdagép kódbázis
+      - /var/run/docker.sock:/var/run/docker.sock  # Dinamikus kontener inditasi jog
+      - .:/workspace                                # Gazdagep kodbazis
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=sqlite+aiosqlite:////workspace/.ai-os/ai_os.db
@@ -98,9 +98,9 @@ services:
 
 ---
 
-## 4. Kommunikációs Protokollok és API Végpontok
+## 4. Kommunikacios Protokollok es API Endpointok
 
-Az Orchestrator háromféle interfészt biztosít: **MCP JSON-RPC**, **FastAPI REST API**, és **WebSockets**.
+Az Orchestrator haromfele interfeszt biztosit: **MCP JSON-RPC**, **FastAPI REST API**, es **WebSockets**.
 
 ```mermaid
 graph LR
@@ -109,28 +109,28 @@ graph LR
     UI <-->|WebSockets| WS[FastAPI WS Server :8000]
 ```
 
-### 4.1. MCP Szerver Interfész (JSON-RPC 2.0 over SSE / Stdio)
-- **SSE Végpont**: `GET /mcp/sse` (Server-Sent Events kapcsolat létesítése az LLM ágensekkel)
-- **Message Végpont**: `POST /mcp/messages` (JSON-RPC tool hívások fogadása)
+### 4.1. MCP Szerver Interfesz (JSON-RPC 2.0 over SSE / Stdio)
+- **SSE Endpoint**: `GET /mcp/sse` (Server-Sent Events kapcsolat letesitese az LLM agensekkel)
+- **Message Endpoint**: `POST /mcp/messages` (JSON-RPC tool hivasok fogadasa)
 
 ---
 
-### 4.2. REST API Végpontok (`FastAPI`)
+### 4.2. REST API Endpointok (`FastAPI`)
 
-| Metódus | Végpont | Leírás / Funkció |
+| Method | Endpoint | Description / Function |
 | :--- | :--- | :--- |
-| `POST` | `/api/v1/epics` | Új felhasználói kérés felvétele és DAG tervezés elindítása. |
-| `GET` | `/api/v1/dags/{dag_id}` | Az aktuális DAG gráf állapotának és feladat-nodejainak lekérése. |
-| `GET` | `/api/v1/locks` | Aktív fájl zárolások (`Read-Set` / `Write-Set`) lekérése. |
-| `GET` | `/api/v1/metrics/cost` | Összesített token-fogyasztás és dollárköltség lekérdezése. |
-| `POST` | `/api/v1/tasks/{task_id}/retry` | **HITL**: Sikertelen feladat újraidítása egyedi fejlesztői instrukcióval. |
-| `POST` | `/api/v1/tasks/{task_id}/resume` | **HITL**: Kézi kódmódosítás jóváhagyása és a feladat továbbengedése. |
+| `POST` | `/api/v1/epics` | Uj useri keres felvetele es DAG tervezes elinditasa. |
+| `GET` | `/api/v1/dags/{dag_id}` | Az aktualis DAG graf allapotanak es feladat-nodejainak lekerese. |
+| `GET` | `/api/v1/locks` | Aktiv fajl zarolasok (`Read-Set` / `Write-Set`) lekerese. |
+| `GET` | `/api/v1/metrics/cost` | Osszesitett token-fogyasztas es dollarkoltseg lekerdezese. |
+| `POST` | `/api/v1/tasks/{task_id}/retry` | **HITL**: Sikertelen feladat ujraiditasa egyedi developer instrukcioval. |
+| `POST` | `/api/v1/tasks/{task_id}/resume` | **HITL**: Kezi kodmodositas jovahagyasa es a feladat tovabbengedese. |
 
 ---
 
-### 4.3. WebSocket Végpont (Valós Idejű Események)
-- **Végpont**: `WS /api/v1/ws/events`
-- **Payload Példa (Task Állapotváltozás & Log Streaming)**:
+### 4.3. WebSocket Endpoint (Valos Ideju Esemenyek)
+- **Endpoint**: `WS /api/v1/ws/events`
+- **Payload Pelda (Task Allapotvaltozas & Log Streaming)**:
 ```json
 {
   "event_type": "TASK_STATE_CHANGED",
@@ -149,7 +149,7 @@ graph LR
 
 ---
 
-## 5. Python Rendszermag Belépési Pont Blueprint (`main.py`)
+## 5. Python Rendszermag Bestepi Pont Blueprint (`main.py`)
 
 ```python
 import asyncio
@@ -177,7 +177,7 @@ ws_manager = ConnectionManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Indítási architektúra: Adatbázis migrálás, Knowledge Engine betöltése
+    # Inditasi architektura: Adatbazis migralas, Knowledge Engine betoltese
     print("[AI-OS Core] Starting Orchestrator Engine & SQLite Storage...")
     yield
     print("[AI-OS Core] Shutting down Orchestrator Engine...")
