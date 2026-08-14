@@ -307,3 +307,35 @@ async def test_validator_infra_error_blocks_without_retry_or_crash(git_repo: Pat
     assert result.attempts == 1  # no retry against a deterministic infra fault
     assert sandbox.calls == 1
     assert "sql" in result.final_output
+
+
+async def test_triage_agent_heals_blocked_task(git_repo: Path):
+    staging = GitStagingEngine(git_repo)
+    triage_calls: list[tuple[str, str]] = []
+
+    async def fake_triage(output: str, diff: str) -> str:
+        triage_calls.append((output, diff))
+        return "DIAGNOSIS: Syntax error on line 5.\nPROPOSED FIX: Fix syntax error."
+
+    events: list[dict] = []
+    # Fail 2 standard attempts, then succeed on triage attempt 1
+    sandbox = _ScriptedSandboxRunner(fail_count=2)
+    runner = TaskRunner(
+        lock_manager=LockManager(),
+        staging=staging,
+        knowledge_engine=KnowledgeEngine(),
+        agent_turn_executor=_make_fake_executor(),
+        sandbox_runner=sandbox,
+        triage_agent=fake_triage,
+        max_triage_retries=1,
+        on_event=events.append,
+    )
+    result = await runner.run_task(_task(max_retries=1), language="python")
+
+    assert result.status == "COMPLETED"
+    assert len(triage_calls) == 1
+    triage_events = [e for e in events if e.get("type") == "triage_recommendation"]
+    assert len(triage_events) == 1
+    assert "Syntax error" in triage_events[0]["recommendation"]
+    merged_events = [e for e in events if e.get("type") == "merged"]
+    assert merged_events and merged_events[0].get("triage_healed") is True

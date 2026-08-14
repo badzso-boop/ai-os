@@ -253,6 +253,26 @@ async def test_validator_returns_false_leaves_worktree_for_retry(git_repo):
     assert (git_repo / ".ai-os" / "worktrees" / "TASK-H").exists()
 
 
+async def test_final_checkout_merge_git_error_returns_false(git_repo, monkeypatch):
+    engine = GitStagingEngine(git_repo)
+    wt_path = await engine.create_worktree("TASK-I")
+    (wt_path / "final.txt").write_text("content\n")
+
+    original_run_git = engine._run_git
+
+    async def mock_run_git(args, cwd, check=True):
+        if args[:2] == ["merge", "--ff-only"]:
+            raise GitCommandError(args, 1, "fatal: Not possible to fast-forward, aborting.")
+        return await original_run_git(args, cwd, check=check)
+
+    monkeypatch.setattr(engine, "_run_git", mock_run_git)
+
+    result = await engine.stage_and_merge_task("TASK-I", "add final.txt", _always_valid)
+
+    assert result is False
+    assert (git_repo / ".ai-os" / "worktrees" / "TASK-I").exists()
+
+
 async def test_concurrent_pre_validation(git_repo):
     import asyncio
     engine = GitStagingEngine(git_repo)
@@ -280,5 +300,4 @@ async def test_concurrent_pre_validation(git_repo):
     # Initial validation starts for both before any merge lock is acquired, then second task re-validates after rebase
     assert validation_started[:2] == ["TASK-CONC-A", "TASK-CONC-B"] or validation_started[:2] == ["TASK-CONC-B", "TASK-CONC-A"]
     assert len(validation_started) == 3 or len(validation_started) == 4
-
 

@@ -254,8 +254,11 @@ class GitStagingEngine:
             #    directly (fine for a disposable/scratch repo). In PR mode the
             #    base branch is a per-epic integration branch, so this
             #    accumulates the tasks there rather than on main.
-            await self._run_git(["checkout", self.base_branch], self.repo_root)
-            await self._run_git(["merge", "--ff-only", branch], self.repo_root)
+            try:
+                await self._run_git(["checkout", self.base_branch], self.repo_root)
+                await self._run_git(["merge", "--ff-only", branch], self.repo_root)
+            except GitCommandError:
+                return False
 
             # Cleanup only on this success path — a rebase/validation
             # failure above returns before reaching here, leaving the
