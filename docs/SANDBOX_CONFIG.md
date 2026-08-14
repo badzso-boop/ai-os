@@ -79,7 +79,11 @@ adds an i18n task) **and every task's prompt** (so each task follows them):
 
 `setup_commands` / `test_command` run in the language's dependency image, so use
 tooling available there (Python image → `python`/`pip` deps; Node → `npm`/`npx`
-+ installed deps; Maven → `mvn`). For Postgres-native seeding from an image
++ installed deps; Maven → `mvn`). Under **mount isolation** (Python / Java), the host repository
+is mounted read-only at `/app`, so any temporary files or cache generated during `setup_commands`
+must write to RAM-backed writable locations (such as `/tmp`) or standard writable runtime environments
+(e.g., Python site-packages). Both `setup_commands` and `test_command` run in the same container session so
+state and writable modifications persist into the test phase. For Postgres-native seeding from an image
 without `psql`, seed via your app's own tooling (a Flyway seed migration, a
 `tsx`/`python` script that calls your repository layer, etc.).
 

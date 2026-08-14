@@ -439,31 +439,17 @@ class EphemeralSandboxRunner:
         extra_env = tuple(config.env.items()) if config is not None else ()
         command = self._effective_command(profile, config, default_command, language)
         if config is not None and config.setup_commands:
-            if not mount:
-                # Copy-isolation (Node): setup_commands and the test command
-                # MUST run in the SAME container. Each `_run_phase` call is a
-                # fresh, separate `--rm` container from the same image - a
-                # setup step that writes local generated files (the
-                # prototypical case: `prisma generate` writing into
-                # node_modules) would otherwise have those writes silently
-                # discarded when its container exits, and the test container
-                # would start from the original, pre-setup image state as if
-                # setup never ran. See the comment on _combined_setup_and_test_command.
-                resolved_test = command if command is not None else profile.command
-                combined = await self._run_phase(
-                    worktree_path, profile, image, network="none", extra_env=extra_env,
-                    command=_combined_setup_and_test_command(tuple(config.setup_commands), resolved_test),
-                    timeout=self.build_timeout_seconds + self.timeout_seconds,
-                    name_prefix="ai-os-setup", mount=mount,
-                )
-                return _split_combined_result(combined)
-            setup = await self._run_phase(
+            # Setup_commands and test_command run in the SAME container so state
+            # and files written to writable paths (/tmp, site-packages, etc.) or environment
+            # persist seamlessly into the test phase without container boundary loss.
+            resolved_test = command if command is not None else profile.command
+            combined = await self._run_phase(
                 worktree_path, profile, image, network="none", extra_env=extra_env,
-                command=" && ".join(config.setup_commands),
-                timeout=self.build_timeout_seconds, name_prefix="ai-os-setup", mount=mount,
+                command=_combined_setup_and_test_command(tuple(config.setup_commands), resolved_test),
+                timeout=self.build_timeout_seconds + self.timeout_seconds,
+                name_prefix="ai-os-setup", mount=mount,
             )
-            if not setup.success:
-                return _as_setup_failure(setup)
+            return _split_combined_result(combined)
         return await self._run_phase(
             worktree_path, profile, image, network="none", extra_env=extra_env,
             command=command, timeout=self.timeout_seconds, mount=mount,
@@ -489,26 +475,14 @@ class EphemeralSandboxRunner:
             extra_env = tuple(config.env.items())
             command = self._effective_command(profile, config, default_command, language)
             if config.setup_commands:
-                if not mount:
-                    # Copy-isolation: same reasoning as _run_isolated - a
-                    # setup step's local filesystem writes (e.g. `prisma
-                    # generate`) must run in the SAME container as the test
-                    # command, not a separate one that then gets discarded.
-                    resolved_test = command if command is not None else profile.command
-                    combined = await self._run_phase(
-                        worktree_path, profile, image, network=running.network, extra_env=extra_env,
-                        command=_combined_setup_and_test_command(tuple(config.setup_commands), resolved_test),
-                        timeout=self.build_timeout_seconds + self.timeout_seconds,
-                        name_prefix="ai-os-setup", mount=mount,
-                    )
-                    return _split_combined_result(combined)
-                setup = await self._run_phase(
+                resolved_test = command if command is not None else profile.command
+                combined = await self._run_phase(
                     worktree_path, profile, image, network=running.network, extra_env=extra_env,
-                    command=" && ".join(config.setup_commands),
-                    timeout=self.build_timeout_seconds, name_prefix="ai-os-setup", mount=mount,
+                    command=_combined_setup_and_test_command(tuple(config.setup_commands), resolved_test),
+                    timeout=self.build_timeout_seconds + self.timeout_seconds,
+                    name_prefix="ai-os-setup", mount=mount,
                 )
-                if not setup.success:
-                    return _as_setup_failure(setup)
+                return _split_combined_result(combined)
             return await self._run_phase(
                 worktree_path, profile, image, network=running.network, extra_env=extra_env,
                 command=command, timeout=self.timeout_seconds, mount=mount,
