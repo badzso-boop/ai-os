@@ -18,7 +18,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, List, Optional
 
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Float, ForeignKey, ForeignKeyConstraint, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -49,7 +49,7 @@ class TaskModel(Base):
     __tablename__ = "tasks"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)  # e.g. TASK-101
-    epic_id: Mapped[str] = mapped_column(ForeignKey("epics.id"), nullable=False)
+    epic_id: Mapped[str] = mapped_column(ForeignKey("epics.id"), primary_key=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     # LOW, MEDIUM, HIGH, CRITICAL
@@ -86,7 +86,8 @@ class LockAuditModel(Base):
     __tablename__ = "lock_audits"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    epic_id: Mapped[str] = mapped_column(String(36), nullable=False)
     filepath: Mapped[str] = mapped_column(String(512), nullable=False)
     lock_type: Mapped[str] = mapped_column(String(16), nullable=False)  # READ, WRITE
     action: Mapped[str] = mapped_column(String(16), nullable=False)  # ACQUIRE, RELEASE
@@ -94,12 +95,20 @@ class LockAuditModel(Base):
 
     task: Mapped["TaskModel"] = relationship("TaskModel", back_populates="lock_audits")
 
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "epic_id"],
+            ["tasks.id", "tasks.epic_id"],
+        ),
+    )
+
 
 class TokenCostModel(Base):
     __tablename__ = "token_costs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    epic_id: Mapped[str] = mapped_column(String(36), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)  # anthropic, openai, gemini, local
     model_name: Mapped[str] = mapped_column(String(64), nullable=False)  # claude-3-5-sonnet
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
@@ -108,6 +117,13 @@ class TokenCostModel(Base):
     timestamp: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
 
     task: Mapped["TaskModel"] = relationship("TaskModel", back_populates="token_costs")
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "epic_id"],
+            ["tasks.id", "tasks.epic_id"],
+        ),
+    )
 
 
 class GraphNodeModel(Base):
