@@ -111,7 +111,7 @@ class Persistence:
     ) -> None:
         async with self._sf() as session:
             async with session.begin():
-                existing = await session.get(TaskModel, task.id)
+                existing = await session.get(TaskModel, (task.id, epic_id))
                 if existing is None:
                     session.add(
                         TaskModel(
@@ -134,32 +134,68 @@ class Persistence:
                         existing.assigned_model = assigned_model
                     existing.status = status
 
-    async def update_task_status(self, task_id: str, status: str) -> None:
+    async def update_task_status(
+        self, task_id: str, status: str, epic_id: str | None = None
+    ) -> None:
         async with self._sf() as session:
             async with session.begin():
-                task = await session.get(TaskModel, task_id)
+                if epic_id is not None:
+                    task = await session.get(TaskModel, (task_id, epic_id))
+                else:
+                    task = (
+                        await session.execute(
+                            select(TaskModel)
+                            .where(TaskModel.id == task_id)
+                            .order_by(TaskModel.created_at.desc())
+                        )
+                    ).scalars().first()
                 if task is not None:
                     task.status = status
 
     async def record_lock_audit(
-        self, task_id: str, filepath: str, lock_type: str, action: str
+        self, task_id: str, filepath: str, lock_type: str, action: str, epic_id: str | None = None
     ) -> None:
         async with self._sf() as session:
             async with session.begin():
+                if epic_id is None:
+                    task = (
+                        await session.execute(
+                            select(TaskModel)
+                            .where(TaskModel.id == task_id)
+                            .order_by(TaskModel.created_at.desc())
+                        )
+                    ).scalars().first()
+                    if task is not None:
+                        epic_id = task.epic_id
+                    else:
+                        epic_id = ""  # Non-existent epic_id will trigger FK IntegrityError on commit
                 session.add(
                     LockAuditModel(
-                        task_id=task_id, filepath=filepath, lock_type=lock_type, action=action
+                        task_id=task_id, epic_id=epic_id, filepath=filepath, lock_type=lock_type, action=action
                     )
                 )
 
     async def record_token_cost(
-        self, task_id: str, provider: str, model_name: str, usage: TokenUsage
+        self, task_id: str, provider: str, model_name: str, usage: TokenUsage, epic_id: str | None = None
     ) -> None:
         async with self._sf() as session:
             async with session.begin():
+                if epic_id is None:
+                    task = (
+                        await session.execute(
+                            select(TaskModel)
+                            .where(TaskModel.id == task_id)
+                            .order_by(TaskModel.created_at.desc())
+                        )
+                    ).scalars().first()
+                    if task is not None:
+                        epic_id = task.epic_id
+                    else:
+                        epic_id = ""  # Non-existent epic_id will trigger FK IntegrityError on commit
                 session.add(
                     TokenCostModel(
                         task_id=task_id,
+                        epic_id=epic_id,
                         provider=provider,
                         model_name=model_name,
                         input_tokens=usage.input_tokens,
@@ -200,7 +236,14 @@ class Persistence:
                             func.coalesce(func.sum(TokenCostModel.usd_cost), 0.0),
                         )
                         .select_from(TokenCostModel)
-                        .join(TaskModel, TokenCostModel.task_id == TaskModel.id)
+                        .join(
+                            TaskModel,
+                            (TokenCostModel.task_id == TaskModel.id)
+                            & (
+                                (TokenCostModel.epic_id == TaskModel.epic_id)
+                                | (TokenCostModel.epic_id.is_(None) & (TaskModel.epic_id == epic.id))
+                            ),
+                        )
                         .where(TaskModel.epic_id == epic.id)
                     )
                 ).one()
@@ -235,9 +278,14 @@ class Persistence:
                 .order_by(func.sum(TokenCostModel.usd_cost).desc())
             )
             if epic_id is not None:
-                query = query.join(TaskModel, TokenCostModel.task_id == TaskModel.id).where(
-                    TaskModel.epic_id == epic_id
-                )
+                query = query.join(
+                    TaskModel,
+                    (TokenCostModel.task_id == TaskModel.id)
+                    & (
+                        (TokenCostModel.epic_id == TaskModel.epic_id)
+                        | (TokenCostModel.epic_id.is_(None) & (TaskModel.epic_id == epic_id))
+                    ),
+                ).where(TaskModel.epic_id == epic_id)
             rows = (await session.execute(query)).all()
             return [
                 ProviderSpend(
@@ -295,7 +343,14 @@ class Persistence:
                 await session.execute(
                     select(func.coalesce(func.sum(TokenCostModel.usd_cost), 0.0))
                     .select_from(TokenCostModel)
-                    .join(TaskModel, TokenCostModel.task_id == TaskModel.id)
+                    .join(
+                        TaskModel,
+                        (TokenCostModel.task_id == TaskModel.id)
+                        & (
+                            (TokenCostModel.epic_id == TaskModel.epic_id)
+                            | (TokenCostModel.epic_id.is_(None) & (TaskModel.epic_id == epic_id))
+                        ),
+                    )
                     .where(TaskModel.epic_id == epic_id)
                 )
             ).scalar_one()
