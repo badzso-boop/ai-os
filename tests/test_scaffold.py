@@ -34,6 +34,8 @@ def test_scaffold_react_has_package_and_tsconfig():
     assert "package.json" in files and "tsconfig.json" in files
     assert "src/App.tsx" in files and "src/App.test.tsx" in files
     json.loads(files["package.json"])
+    cfg = json.loads(files[".ai-os/sandbox.json"])
+    assert cfg["test_command"] == "npm run typecheck && npm test"
 
 
 def test_scaffold_monorepo_has_both_and_per_language_config():
@@ -44,6 +46,7 @@ def test_scaffold_monorepo_has_both_and_per_language_config():
     assert "requirements.txt" in files and "package.json" in files
     cfg = json.loads(files[".ai-os/sandbox.json"])
     assert set(cfg["languages"]) == {"python", "typescript"}
+    assert cfg["languages"]["typescript"]["test_command"] == "npm run typecheck && npm test"
 
 
 def test_write_scaffold_creates_files_and_refuses_overwrite(tmp_path):
@@ -71,6 +74,8 @@ def test_scaffold_next_prisma_has_schema_and_config():
     files = scaffold_files("next-prisma")
     assert "prisma/schema.prisma" in files and "model Widget" in files["prisma/schema.prisma"]
     assert "package.json" in files and "@prisma/client" in files["package.json"]
+    cfg = json.loads(files[".ai-os/sandbox.json"])
+    assert cfg["test_command"] == "npm run typecheck && npm test"
 
 
 @pytest.mark.parametrize("preset", DB_CAPABLE)
