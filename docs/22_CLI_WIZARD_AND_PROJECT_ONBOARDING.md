@@ -1,102 +1,101 @@
 # 22. CLI Wizard & Interactive Project Onboarding — `ai-os wizard` & AI-driven `ai-os project add`
 
-> **Status: Design Document.** Ez a parancs es bovites NOT YET implemented.
-> A dokumentum az `ai-os wizard` post-install varazslo es a tovabbfejlesztott, AI-alapu `ai-os project add` automatikus projekt-konfiguralo operation irja le. Code and prose are in English.
+> **Status: Implemented (Active).** This document describes the operational specification and design of the `ai-os wizard` post-install wizard and the enhanced, AI-driven `ai-os project add` automatic project configuration generator.
 
 ---
 
-## 1. What it does in one sentence
+## 1. Summary in One Sentence
 
-`ai-os wizard` egy **interaktiv telepites utani varazslo**, amely vegigkiseri a usert a fuggosegek (Docker, Git, gh CLI) ellenorzesen, az LLM providerek/hitelesitesek beallitasan es a sandbox tesztelesen. A tovabbfejlesztott **`ai-os project add`** pedig automatikusan beolvassa a projekt dokumentacioit (`CLAUDE.md`, `README.md`, `docs/`, `package.json` stb.), es egy **LOW/MEDIUM AI modell segitsegevel automatikusan generates** a projekt `.ai-os/` konfiguracios fajljait (`instructions.json`, `conventions.md`, `sandbox.json`, `ui.json`) — dokumentacio hianyaban pedig felajanl egy **MEDIUM/HIGH AI melyelemzest** a kodstruktura based on.
+`ai-os wizard` is an **interactive post-installation wizard** that guides the user through checking dependencies (Docker, Git, gh CLI), setting up LLM providers/authentications, and testing the sandbox execution environment. The enhanced **`ai-os project add`** automatically scans project documentation (`CLAUDE.md`, `README.md`, `docs/`, `package.json`, etc.) and uses a **LOW/MEDIUM AI model to automatically generate** the project's `.ai-os/` configuration files (`instructions.json`, `conventions.md`, `sandbox.json`, `ui.json`) — or, if documentation is missing, offers a **MEDIUM/HIGH AI deep codebase analysis** based on the code structure.
 
 ---
 
-## 2. Reszletes architektura es munkafolyamat
+## 2. Detailed Architecture and Workflow
 
-### 2.1. `ai-os wizard` — Interaktiv telepitesi varazslo
+### 2.1. `ai-os wizard` — Interactive Installation Wizard
 
-A parancs celja, hogy az elso `pip install` utan a user **egyetlen paranccsal elesiteni tudja az AI-OS rendszert**, kezi `.env` masolgatas nelkul.
+The goal of this command is to enable the user to **activate the AI-OS system with a single command** immediately after `pip install`, without manually copying and editing `.env` files.
 
 ```
 ai-os wizard
 ```
 
-#### A varazslo stepei:
-1. **Kornyezeti ellenorzes (Environment Check):**
-   - Python verzio (3.13+ elvart)
-   - Docker demon allapota (`docker info`) — ha nem fut, figyelmeztet a sandbox fuggosegre
-   - Git & GitHub CLI (`gh auth status`) jelenlete
-2. **Provider hitelesites & Login varazslo:**
-   - Detektalja a meglevo munkafuzet-munkameneteket:
-     - Google Antigravity CLI (`agy`) fiok
-     - Anthropic CLI (`claude`) fiok
-   - Ellenorzi a kornyezeti valtozokat (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`)
-   - Felajanlja az hianyzo kulcsok bekereset vagy a munkamenet-alapu fiokbejelentkezest
-   - Futat egy teszt pinget (`ai-os llm list`)
-3. **Sandbox Docker image ellenorzes:**
-   - Ellenorzi az `ai-os-sandbox-python:3.12` Docker kep megletet
-   - Ha hianyzik, automatikusan leallitja es felajanlja a `docker build -t ai-os-sandbox-python:3.12 -f docker/python-sandbox.Dockerfile .` lefuttatasat
-4. **Kockazat-routing es budget beallitas:**
-   - Interaktiv prompt a kockazati szintek (LOW, MEDIUM, HIGH, CRITICAL) providereinek hozzarendelesere
-   - Opcionalis `AI_OS_EPIC_BUDGET_USD` beallitasa tulkoltekezes ellen
+#### Wizard Steps:
+1. **Environment Check:**
+   - Python version (Python 3.13+ expected)
+   - Docker daemon status (`docker info`) — if not running, warns about the sandbox dependency
+   - Git & GitHub CLI (`gh auth status`) presence
+2. **Provider Authentication & Login Wizard:**
+   - Detects existing CLI session logins:
+     - Google Antigravity CLI (`agy`) account
+     - Anthropic CLI (`claude`) account
+   - Checks environment variables (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`)
+   - Offers to prompt for missing API keys or use session-based account login
+   - Executes a test ping (`ai-os llm list`)
+3. **Sandbox Docker Image Check:**
+   - Checks for the presence of the `ai-os-sandbox-python:3.12` Docker image
+   - If missing, automatically prompts to run `docker build -t ai-os-sandbox-python:3.12 -f docker/python-sandbox.Dockerfile .`
+4. **Risk Routing & Budget Settings:**
+   - Interactive prompt to assign provider models for risk levels (LOW, MEDIUM, HIGH, CRITICAL)
+   - Optional setting for `AI_OS_EPIC_BUDGET_USD` to prevent budget overruns
 
 ---
 
-### 2.2. Tovabbfejlesztott `ai-os project add` — AI-alapu konfiguracio-generalas
+### 2.2. Enhanced `ai-os project add` — AI-driven Configuration Generation
 
-Amikor a user hozzaad egy projektet az AI-OS regiszterhez:
+When a user adds a project to the AI-OS register:
 
 ```bash
 ai-os project add <name> <path> [--deep]
 ```
 
-#### A folyamat stepei:
+#### Workflow Steps:
 
 ```
 [ai-os project add <name> <path>]
          │
          ▼
-(1) Statikus dokumentacio kereses ── (CLAUDE.md, README.md, docs/, build manifestek)
+(1) Static Documentation Search ── (CLAUDE.md, README.md, docs/, build manifests)
          │
-         ├──► VANNAK dokumentacios fajlok?
+         ├──► ARE THERE documentation files?
          │         │
-         │         ├─► [IGEN] ──► (2) Gyors AI szintezis (LOW / MEDIUM modell)
-         │         │                 Generalja: instructions.json, conventions.md, sandbox.json
+         │         ├─► [YES] ──► (2) Fast AI Synthesis (LOW / MEDIUM model)
+         │         │                Generates: instructions.json, conventions.md, sandbox.json
          │         │
-         │         └─► [NEM]  ──► (3) Figyelmeztetes + Interaktiv felajanlas:
+         │         └─► [NO]  ──► (3) Warning + Interactive Prompt:
          │                           "[warning] No documentation files found in <path>.
          │                           Would you like a MEDIUM/HIGH AI model to perform
          │                           a deep codebase inspection and auto-generate configs? [Y/n]"
          │                                 │
-         │                                 └─► [IGEN] ──► (4) Melyelemzes (MEDIUM / HIGH modell)
-         │                                                   Kodstruktura, AST, manifestek beolvasasa
-         │                                                   Generalja a teljes .ai-os/ konfig csomagot
+         │                                 └─► [YES] ──► (4) Deep Inspection (MEDIUM / HIGH model)
+         │                                                   Read code structure, AST, manifests
+         │                                                   Generates complete .ai-os/ config suite
 ```
 
 ---
 
-### 2.3. CLI Olvashatosag es Eletut-megjelenites (Enhanced Glass-Box CLI Stream)
+### 2.3. CLI Readability and Lifecycle Rendering (Enhanced Glass-Box CLI Stream)
 
-Az `ai-os epic run` es `ai-os task run` folyaman a terminal kimenete **gazdag Rich formazassal** es jol olvashato step-statuszokkal jelenik meg:
-- **Rich Stream Panel**: Szines statuszikonok (▶ futas, ✓ sikeres merge, ⚠ figyelmeztetes, ✗ sandbox hiba), futasi idozito (elapsed timer) es valos ideju token/USD koltsegkijelzes.
-- **Attekintheto reszletek**: A sandbox kimeneti tail-jenek es a tesztkritikusi eszreveteleknek keretezett, atlathato megjelenitese.
-
----
-
-### 2.4. Biztonsagos Git MCP Eszkozok (Safe Git MCP Tools)
-
-Az `ai_os/mcp/mcp_server.py` szerver kibovul biztonsagi korlatokkal vedett Git MCP eszkozokkel:
-- `git_status`: Visszaadja a jelenlegi git agat, a modositott es untracked fajlokat.
-- `git_pull_main`: Biztonsagosan lehuzza a legfrissebb `main` agat (`git pull origin main`), garantalva, hogy uncommitted valtoztatasok in case of nem irja felul a fajlokat.
-- `git_create_branch`: Uj feature agat hoz letre a megadott nevmintaval.
-- `git_diff_summary`: Visszaadja a torzstol valo eltereseket a tesztekhez es kodulvizsgalathoz.
+During `ai-os epic run` and `ai-os task run`, terminal output is displayed using **rich formatting** with clear step statuses:
+- **Rich Stream Panel**: Color-coded status icons (▶ running, ✓ merged successfully, ⚠ warning, ✗ sandbox error), elapsed execution timer, and real-time token/USD cost counters.
+- **Clear Details**: Framed, clean preview of sandbox output tail and test critic observations.
 
 ---
 
-## 3. Generalt konfiguracios fajlok formatuma
+### 2.4. Safe Git MCP Tools
+
+The `ai_os/mcp/mcp_server.py` server is extended with safety-gated Git MCP tools:
+- `git_status`: Returns current git branch, modified files, and untracked files.
+- `git_pull_main`: Safely pulls the latest `main` branch (`git pull origin main`), guaranteeing no file overwrites if there are uncommitted changes.
+- `git_create_branch`: Creates a new feature branch matching the specified naming pattern.
+- `git_diff_summary`: Returns differences from the trunk for testing and code review.
+
+---
+
+## 3. Generated Configuration File Format
 
 ### 3.1. `.ai-os/instructions.json`
-Tartalmazza a projekt gepi specifikaciojat, parancsait es dokumentacios linkait:
+Contains machine-readable project specifications, commands, and documentation references:
 
 ```json
 {
@@ -120,10 +119,10 @@ Tartalmazza a projekt gepi specifikaciojat, parancsait es dokumentacios linkait:
 ```
 
 ### 3.2. `.ai-os/conventions.md`
-A projekt specifikus konvencioi, i18n szabalyok, UI reszponzivitasi szabalyok (pl. 375px mobil nezet) es tesztelesi elvarasok.
+Project-specific coding conventions, i18n rules, UI responsiveness guidelines (e.g., 375px mobile viewport), and testing expectations.
 
 ### 3.3. `.ai-os/sandbox.json`
-A Docker sandbox futtato parancsai es kornyezeti valtozoi:
+Execution commands and environment variables for the Docker sandbox:
 
 ```json
 {
@@ -134,17 +133,17 @@ A Docker sandbox futtato parancsai es kornyezeti valtozoi:
 
 ---
 
-## 4. Implementacios modulok
+## 4. Implementation Modules
 
-- **`ai_os/core/wizard.py`**: Interaktiv kornyezetellenorzes, login teszteles, `.env` kezeles.
-- **`ai_os/core/onboarding.py`**: Dokumentacio-pasztazo, LLM prompt-sablonok a konfig-generalashoz, melyelemzo fallback.
-- **`ai_os/cli.py`**: `@main.command("wizard")` es a kibovitett `@project.command("add")`.
-- **`tests/test_wizard.py`** & **`tests/test_onboarding.py`**: Unit es CLI tesztek `CliRunner` es `tmp_path` segitsegevel.
+- **`ai_os/core/wizard.py`**: Interactive environment checking, login testing, `.env` management.
+- **`ai_os/core/onboarding.py`**: Documentation scanner, LLM prompt templates for config generation, deep analysis fallback.
+- **`ai_os/cli.py`**: `@main.command("wizard")` and expanded `@project.command("add")`.
+- **`tests/test_wizard.py`** & **`tests/test_onboarding.py`**: Unit and CLI tests using `CliRunner` and `tmp_path`.
 
 ---
 
 ## Related Documents
 
-- `docs/01_ARCHITECTURE_OVERVIEW.md` — a rendszer altalanos architekturaja.
-- `docs/20_STARTUP_GENERATOR.md` — a statikus demo generator specification.
-- `docs/21_STATIC_SUBDOMAIN_DEPLOY.md` — az elo subdomain deploy script.
+- `docs/01_ARCHITECTURE_OVERVIEW.md` — General system architecture.
+- `docs/20_STARTUP_GENERATOR.md` — Static demo generator specification.
+- `docs/21_STATIC_SUBDOMAIN_DEPLOY.md` — Live subdomain deploy script specification.

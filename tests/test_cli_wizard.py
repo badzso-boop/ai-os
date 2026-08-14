@@ -21,14 +21,8 @@ from rich.console import Console
 # `ai-os wizard`/`ai-os project add`'s interactive-prompt path, `printer`, and
 # `_make_event_printer` don't exist in that version; skip this whole module
 # until the wizard is properly wired back into cli.py instead of replacing it.
-try:
-    from ai_os.cli import main, _make_event_printer, printer
-    from ai_os.core.wizard import WizardResult, CheckResult
-except ImportError:
-    pytest.skip(
-        "cli.py restored to the pre-wizard-epic version; wizard CLI wiring not merged back yet",
-        allow_module_level=True,
-    )
+from ai_os.cli import main, _make_event_printer, printer
+from ai_os.core.wizard import WizardResult, CheckResult
 
 
 def test_cli_wizard_command_runs_wizard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,7 +59,7 @@ def test_cli_wizard_command_real_execution() -> None:
     assert "Environment Checks" in result.output
 
 
-def test_cli_project_add_interactive_prompt_deep_scan(tmp_path: Path) -> None:
+def test_cli_project_add_interactive_prompt_deep_scan(tmp_path: Path, isolated_home: Path) -> None:
     """Test ai-os project add with interactive prompt accepting deep scan (input='y')."""
     proj_dir = tmp_path / "interactive_proj"
     proj_dir.mkdir()
@@ -84,7 +78,7 @@ def test_cli_project_add_interactive_prompt_deep_scan(tmp_path: Path) -> None:
     assert "main.py:run_app" in inst_data["code_stubs"]
 
 
-def test_cli_project_add_interactive_prompt_no_deep_scan(tmp_path: Path) -> None:
+def test_cli_project_add_interactive_prompt_no_deep_scan(tmp_path: Path, isolated_home: Path) -> None:
     """Test ai-os project add with interactive prompt declining deep scan (input='n')."""
     proj_dir = tmp_path / "light_proj"
     proj_dir.mkdir()
@@ -101,7 +95,7 @@ def test_cli_project_add_interactive_prompt_no_deep_scan(tmp_path: Path) -> None
     assert inst_data["deep_scan"] is False
 
 
-def test_cli_project_add_flag_override(tmp_path: Path) -> None:
+def test_cli_project_add_flag_override(tmp_path: Path, isolated_home: Path) -> None:
     """Test ai-os project add with --deep-scan flag skipping interactive prompt."""
     proj_dir = tmp_path / "flag_proj"
     proj_dir.mkdir()
