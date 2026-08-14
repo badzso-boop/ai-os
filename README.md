@@ -71,8 +71,10 @@ AI-OS is organized into four main layers plus an observability surface:
 4. 📚 [Knowledge Graph & Context Cache](docs/04_KNOWLEDGE_CONTEXT_ENGINE.md) — knowledge graph, software entities, and event-driven cache invalidation.
 5. 🛡️ [Execution & Validation Sandbox](docs/05_EXECUTION_VALIDATION_SANDBOX.md) — Git worktrees, ephemeral Docker/Podman containers, and the HITL preemption engine.
 6. 📊 [Glass Box UI & Observability](docs/06_GLASS_BOX_UI.md) — real-time CLI/web dashboard for supervising the system.
+7. 🧙‍♂️ [CLI Wizard & Interactive Onboarding](docs/22_CLI_WIZARD_AND_PROJECT_ONBOARDING.md) — post-install setup wizard and AI-driven project onboarding specification.
+8. 🔧 [Wizard CLI Re-Integration Details](docs/WIZARD_CLI_INTEGRATION.md) — summary of the wizard, interactive project onboarding, and event printer integration, history, and testing.
 
-> The `docs/` specs are written in Hungarian and remain the authoritative design source for anything not yet implemented. `CLAUDE.md` documents exactly what is built today, per phase.
+> The `docs/` specifications serve as the authoritative design source for architecture and features. `CLAUDE.md` documents exactly what is built today, per phase.
 
 ---
 
@@ -205,12 +207,19 @@ ai-os epic run myapp --prompt "add a users list page calling the API" --language
 
 > **Sweet spot vs. from-scratch.** AI-OS shines on **incremental changes to an existing codebase** (the Context Cache grounds it in real code, the sandbox validates against real tests). `ai-os init` gives you a working baseline so you get that benefit immediately instead of hand-building scaffolding.
 
-### A. Register projects
+### A. Register & Setup projects
 
 Project roots live in an external, updatable registry (`~/.ai-os/projects.json`). You can register a name, or just pass a filesystem path directly to any command.
 
 ```bash
+# Post-install interactive diagnostic wizard (checks dependencies, credentials, docker sandbox image)
+ai-os wizard
+
+# Add project with interactive onboarding & automatic config generation (.ai-os/ instructions, conventions, sandbox)
 ai-os project add my-project /path/to/project
+# Pass --deep-scan to bypass the interactive prompt and perform deep AST analysis:
+ai-os project add my-project /path/to/project --deep-scan
+
 ai-os project list
 ai-os project remove my-project
 ```
