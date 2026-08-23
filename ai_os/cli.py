@@ -29,7 +29,7 @@ from ai_os.core.startup.brief import parse_startup_brief
 from ai_os.core.startup.generator import generate_startup
 from ai_os.core.persistence import Persistence, default_db_url
 from ai_os.core.run_lock import RunLockError, acquire_epic_run_lock
-from ai_os.core.sensitive_files import sensitive_paths
+from ai_os.core.safety_policy import evaluate_plan_safety
 from ai_os.core.scheduler import DynamicScheduler
 from ai_os.core.scheduling_policy import SchedulingPolicy
 from ai_os.core.staging import GitStagingEngine
@@ -820,20 +820,19 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
 
     # Security guard: flag tasks touching CI/secrets/build/AI-OS-config files —
     # these run with real credentials post-merge, so they must go through a
-    # reviewable PR, never a blind --merge-to-main.
-    flagged = sensitive_paths({p for t in tasks for p in t.write_set})
-    if flagged:
+    # reviewable PR, never a blind --merge-to-main. Decision logic lives in
+    # core/safety_policy.py (pure, no I/O) so a future API entry point can
+    # enforce the same rule without duplicating it here.
+    safety = evaluate_plan_safety(tasks, merge_to_main_requested=merge_to_main)
+    if safety.flagged_paths:
         console.print(
             "\n[bold yellow]⚠ Security-sensitive files in this plan[/bold yellow] "
             "(run with real credentials in CI / change how AI-OS validates) — review carefully:"
         )
-        for p in flagged:
+        for p in sorted(safety.flagged_paths):
             console.print(f"  [yellow]•[/yellow] {p}")
-        if merge_to_main:
-            raise click.ClickException(
-                "Refusing --merge-to-main: this plan touches security-sensitive files. "
-                "Run without --merge-to-main so the change goes through a PR a human reviews."
-            )
+        if not safety.merge_to_main_allowed:
+            raise click.ClickException(safety.reason)
         console.print("[dim]These will go through the PR (default) for human review before merge.[/dim]")
 
     # HITL Stage 1: Plan Review gate (doc 12 §2.1). The React UI version is
