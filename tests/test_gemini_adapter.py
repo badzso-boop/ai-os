@@ -175,3 +175,99 @@ async def test_malformed_candidate_shape_raises_gemini_api_error_not_keyerror():
 
     with pytest.raises(GeminiApiError):
         await adapter.execute_task(request)
+
+
+# -- CLI-session mode tests (issue #17: tool-lockdown asymmetry) -------------
+
+
+def _write_fake_agy(tmp_path, script_body: str):
+    import stat
+
+    script_path = tmp_path / "fake_agy.py"
+    script_path.write_text(script_body)
+    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return script_path
+
+
+def _argv_capturing_stub(tmp_path, response_json: dict, exit_code: int = 0):
+    argv_log = tmp_path / "argv.json"
+    response_text = json.dumps(response_json)
+    script = f"""#!/usr/bin/env python3
+import json
+import sys
+
+with open({str(argv_log)!r}, "w") as f:
+    json.dump(sys.argv, f)
+
+print({response_text!r})
+sys.exit({exit_code})
+"""
+    return _write_fake_agy(tmp_path, script)
+
+
+def _read_argv_log(tmp_path) -> list[str]:
+    return json.loads((tmp_path / "argv.json").read_text())
+
+
+async def test_cli_session_builds_locked_down_argv(tmp_path):
+    """`agy` genuinely supports a plan/read-only mode and a sandbox flag —
+    verified against its real `--help` output (issue #17) — so the
+    CLI-session executor must use exactly those, not the fabricated
+    `--disallowedTools` flag `agy` doesn't have (which a prior, closed fix
+    attempt used, and which `agy` would reject outright as unrecognized).
+    """
+    from ai_os.mcp.adapters.gemini_adapter import GEMINI_CLI_SESSION_LOCKDOWN_FLAGS
+
+    fake_response = {
+        "status": "SUCCESS",
+        "response": "hello from cli",
+        "usage": {"input_tokens": 10, "output_tokens": 20},
+    }
+    stub = _argv_capturing_stub(tmp_path, fake_response)
+    adapter = GeminiAdapter(gemini_cli=str(stub), use_cli_session=True)
+
+    request = LLMTaskRequest(task_id="t10", context_payload="hello")
+    response = await adapter.execute_task(request)
+
+    assert response.generated_text == "hello from cli"
+    argv = _read_argv_log(tmp_path)
+
+    assert "--mode" in argv
+    assert argv[argv.index("--mode") + 1] == "plan"
+    assert "--sandbox" in argv
+    assert "-p" in argv
+    assert argv[argv.index("-p") + 1] == "hello"
+    assert "--output-format" in argv
+    assert argv[argv.index("--output-format") + 1] == "json"
+
+    # The old, wrong lockdown attempt must be fully gone.
+    assert "accept-edits" not in argv
+    assert "--dangerously-skip-permissions" not in argv
+    assert "--disallowedTools" not in argv
+
+    # Every flag GEMINI_CLI_SESSION_LOCKDOWN_FLAGS declares actually landed
+    # in argv, contiguously, so the constant and the real invocation can't
+    # drift apart silently.
+    joined = " ".join(argv)
+    assert " ".join(GEMINI_CLI_SESSION_LOCKDOWN_FLAGS) in joined
+
+
+def test_cli_session_selection_logs_reduced_isolation_warning(caplog):
+    """Operators must see, at runtime (not just in a code comment), that the
+    Gemini CLI-session path has coarser tool isolation than Anthropic's
+    (no --disallowedTools equivalent in `agy`).
+    """
+    with caplog.at_level("WARNING", logger="ai_os.mcp.adapters.gemini_adapter"):
+        GeminiAdapter(gemini_cli="agy", use_cli_session=True)
+
+    assert any(
+        "agy" in record.getMessage() and "disallowedTools" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_api_key_mode_selection_does_not_log_warning(caplog):
+    with caplog.at_level("WARNING", logger="ai_os.mcp.adapters.gemini_adapter"):
+        GeminiAdapter(api_key="test-api-key", use_cli_session=False)
+
+    assert not caplog.records
