@@ -8,6 +8,7 @@ import asyncio
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import click
@@ -20,6 +21,8 @@ from ai_os.analyzer.call_graph_builder import CallGraphBuilder
 from ai_os.analyzer.languages import LANGUAGES
 from ai_os.core.epic_planner import EpicPlanError, decompose
 from ai_os.core.epic_runner import EpicRunner
+from ai_os.core.job import EpicJob
+from ai_os.core.job_sinks import ConsoleEventSink
 from ai_os.core.lock_manager import LockManager
 from ai_os.core.conventions import load_project_conventions
 from ai_os.core.cost_estimator import estimate_epic
@@ -835,9 +838,20 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
             raise click.ClickException(safety.reason)
         console.print("[dim]These will go through the PR (default) for human review before merge.[/dim]")
 
+    # Transport-agnostic Job/Event model (doc 23 §2, issue #36): one EpicJob
+    # wraps this run's EpicRunner execution and fans its events out to every
+    # registered EventSink — a Rich console today, a persisted event log or a
+    # WebSocket broadcaster later, with no change to this calling code.
+    job = EpicJob(job_id=uuid.uuid4().hex[:12], tasks=tasks, epic_title=prompt[:120], raw_prompt=prompt)
+    job.register_sink(ConsoleEventSink(console, verbose))
+
     # HITL Stage 1: Plan Review gate (doc 12 §2.1). The React UI version is
     # Phase 4b; the approval gate itself works fine in a terminal.
-    if not yes and not click.confirm("\nApprove this plan and execute the DAG?", default=False):
+    # job.approve_plan() replaces the raw click.confirm call — with no
+    # argument it still blocks synchronously on stdin (identical UX), but a
+    # future non-interactive caller (an API endpoint) could pass a decision
+    # directly instead.
+    if not yes and not job.approve_plan():
         console.print("Aborted — no tasks were run.")
         return
 
@@ -868,21 +882,20 @@ def epic_run(name_or_path: str, prompt: str, language: str, yes: bool, merge_to_
             summarizer=summarizer,
             test_critic=test_critic,
             triage_agent=triage_agent,
-            # Terminal states only — the attempt/validation events (on_event)
-            # cover the in-flight detail, so RUNNING would just be noise.
-            on_status_change=lambda tid, status: (
-                console.print(f"[dim]{tid}: {status}[/dim]") if status != "RUNNING" else None
-            ),
             persistence=persistence,
             # Stage 4: rate-limit backoff + provider fallback always on; the
             # optional cost cap comes from AI_OS_EPIC_BUDGET_USD in the env.
             scheduling_policy=SchedulingPolicy.from_env(),
             create_pr=not merge_to_main,
             pr_base_branch=pr_base,
-            on_event=_make_event_printer(verbose),
+            # on_event/on_status_change are NOT set here — EpicJob.bind_runner()
+            # takes them over and fans them to its registered sinks instead
+            # (ConsoleEventSink reproduces this exact output).
         )
+        job.bind_runner(runner)
+        task = job.start()
         try:
-            return await runner.run_epic(tasks, epic_title=prompt[:120], raw_prompt=prompt)
+            return await task
         finally:
             await engine.dispose()
 
