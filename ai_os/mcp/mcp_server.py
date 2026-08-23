@@ -416,13 +416,11 @@ async def dispatch_tool_call(ctx: ToolContext, name: str, arguments: dict[str, o
         if name in ("git_status", "git_pull_main", "git_create_branch", "git_diff_summary"):
             worktree_root = ctx.worktree_path.resolve()
             if "repo_path" in arguments:
-                candidate = (worktree_root / arguments["repo_path"]).resolve()
-                if not str(candidate).startswith(str(worktree_root)):
-                    return _error_result(
-                        f"repo_path resolves outside worktree root: '{arguments['repo_path']}'"
-                    )
+                try:
+                    effective_path = _resolve_within_worktree(ctx.worktree_path, arguments["repo_path"])
+                except PathTraversalError as exc:
+                    return _error_result(f"REJECTED: {exc}")
                 # Use the validated candidate path, drop repo_path from arguments
-                effective_path = candidate
                 filtered_args = {k: v for k, v in arguments.items() if k != "repo_path"}
             else:
                 effective_path = worktree_root

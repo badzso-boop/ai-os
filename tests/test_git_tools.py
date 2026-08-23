@@ -242,6 +242,6 @@ def test_mcp_server_git_tools_dispatch(tmp_path: Path) -> None:
         # Test path traversal prevention for git tools
         traversal_res = await dispatch_tool_call(ctx, "git_status", {"repo_path": "../outside"})
         assert traversal_res.is_error is True
-        assert "outside worktree root" in traversal_res.content[0].text
+        assert "outside the worktree root" in traversal_res.content[0].text
 
     asyncio.run(_runner())
