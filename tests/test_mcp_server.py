@@ -333,6 +333,56 @@ async def test_dispatch_missing_required_arguments_is_tool_error_not_crash(tmp_p
     assert "Invalid arguments" in result.content[0].text
 
 
+async def test_dispatch_git_tool_rejects_sibling_dir_sharing_prefix(tmp_path):
+    """Regression test for issue #33: the old `repo_path` validation used a
+    naive `str(candidate).startswith(str(worktree_root))` check, which wrongly
+    accepts a *sibling* directory whose name happens to share the worktree
+    root's name as a string prefix (e.g. `worktree-1` vs `worktree-10`).
+    `repo_path="../worktree-10"` must be rejected, not silently resolved
+    outside the worktree.
+    """
+    worktree_root = tmp_path / "worktree-1"
+    worktree_root.mkdir()
+    sibling = tmp_path / "worktree-10"
+    sibling.mkdir()
+
+    ctx = _ctx(worktree_root)
+    result = await dispatch_tool_call(ctx, "git_status", {"repo_path": "../worktree-10"})
+
+    assert result.is_error is True
+    assert "outside the worktree root" in result.content[0].text
+
+
+async def test_dispatch_git_tool_accepts_path_inside_worktree(tmp_path):
+    worktree_root = tmp_path / "worktree-1"
+    worktree_root.mkdir()
+    subdir = worktree_root / "sub"
+    subdir.mkdir()
+    # Real git repo so git_status succeeds past the path-validation stage.
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=worktree_root, check=True, capture_output=True)
+
+    ctx = _ctx(worktree_root)
+    result = await dispatch_tool_call(ctx, "git_status", {"repo_path": "sub/.."})
+
+    assert result.is_error is False
+    assert "outside the worktree root" not in result.content[0].text
+
+
+async def test_dispatch_git_tool_defaults_to_worktree_root_when_repo_path_omitted(tmp_path):
+    worktree_root = tmp_path / "worktree-1"
+    worktree_root.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=worktree_root, check=True, capture_output=True)
+
+    ctx = _ctx(worktree_root)
+    result = await dispatch_tool_call(ctx, "git_status", {})
+
+    assert result.is_error is False
+
+
 # -- ServerConfig.from_env --------------------------------------------------------------
 
 
