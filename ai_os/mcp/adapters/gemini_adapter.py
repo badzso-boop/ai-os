@@ -26,15 +26,39 @@ used the now-stale `gemini-1.5-flash` model id. As of verification:
   published deprecation schedule). Fully overridable via the constructor's
   `model` param or per-request via `request.model`, so a future rename is a
   one-line fix here, not a redesign.
+
+CLI-session tool-lockdown posture (verified against the installed `agy`
+1.1.13 `--help`, not assumed — see the task brief for issue #17 that
+prompted this): `agy` (Google Antigravity CLI) has a real, genuine
+equivalent of Claude Code's `--permission-mode plan` — its own `--mode`
+flag accepts `plan` (vs. `accept-edits`), and it additionally exposes
+`--sandbox` ("Run in a sandbox with terminal restrictions enabled"), which
+`claude` has no direct equivalent of. **It has no equivalent of
+`--disallowedTools`** — there is no per-tool allow/deny list in its flag
+surface at all. Passing `--disallowedTools` anyway (as a prior, since-closed
+attempt at this fix did) is not merely a no-op: `agy` is a Go CLI that
+rejects unrecognized flags outright (`flags provided but not defined:
+-disallowedTools`, confirmed by invoking it directly), so that attempt would
+have made every Gemini CLI-session call fail immediately. The fix here uses
+only flags `agy` actually implements: `--mode plan` (blocks edits, matching
+`--permission-mode plan`'s read-only intent) plus `--sandbox` (a coarser,
+CLI-level restriction with no direct Claude-side analogue, kept as extra
+defense-in-depth). The residual asymmetry — no fine-grained per-tool
+disallow-list — is a real, accepted gap, not an oversight: see
+`GEMINI_CLI_SESSION_LOCKDOWN_NOTE` below and the runtime warning emitted
+whenever `use_cli_session=True` is selected.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import tempfile
 from pathlib import Path
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from ai_os.mcp.adapters.base_adapter import (
     BaseMCPAdapter,
@@ -47,6 +71,18 @@ from ai_os.mcp.adapters.base_adapter import (
 )
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# Locks the CLI-session subprocess down using every restriction `agy`
+# actually supports: `--mode plan` (read-only exploration; blocks edits,
+# the same intent as Anthropic's `--permission-mode plan`) plus `--sandbox`
+# (agy's own terminal-restriction flag — kept as extra defense-in-depth,
+# no Claude-side equivalent). Deliberately NOT a `--disallowedTools`-style
+# per-tool list: `agy` 1.1.13 has no such flag (verified via `--help`; a
+# fabricated one is rejected outright as an unrecognized flag), so there is
+# no way to get Anthropic's fine-grained tool-disallow coverage here. See
+# the module docstring and the `GeminiAdapter.__init__` warning for the
+# full rationale.
+GEMINI_CLI_SESSION_LOCKDOWN_FLAGS = ["--mode", "plan", "--sandbox"]
 
 
 class GeminiCliError(RuntimeError):
@@ -77,7 +113,11 @@ class GeminiAdapter(BaseMCPAdapter):
 
     Supports two modes:
     1. CLI session mode (`use_cli_session=True`) — shells out to the `agy` CLI
-       using the user's logged-in Google / Antigravity subscription.
+       using the user's logged-in Google / Antigravity subscription, locked
+       down with every restriction `agy` actually supports
+       (`GEMINI_CLI_SESSION_LOCKDOWN_FLAGS`: `--mode plan` + `--sandbox`) —
+       see the module docstring for why this is coarser than the Anthropic
+       CLI-session adapter's tool lockdown, not equivalent to it.
     2. API-key mode (`api_key=...`) — direct HTTP requests to Google AI Studio API.
     """
 
@@ -93,6 +133,17 @@ class GeminiAdapter(BaseMCPAdapter):
         self.use_cli_session = use_cli_session
         self.model = model
         self.gemini_cli = gemini_cli
+        if use_cli_session:
+            logger.warning(
+                "GeminiAdapter is running in CLI-session mode (`agy`). This is "
+                "locked down with `%s`, but `agy` has no equivalent of "
+                "Anthropic's `--disallowedTools` per-tool allow/deny list, so "
+                "the Gemini CLI-session path has coarser isolation than the "
+                "Anthropic CLI-session path (`--permission-mode plan` + an "
+                "explicit tool disallow-list). See the module docstring in "
+                "ai_os/mcp/adapters/gemini_adapter.py for the full rationale.",
+                " ".join(GEMINI_CLI_SESSION_LOCKDOWN_FLAGS),
+            )
         self.client = client if client is not None else httpx.AsyncClient(timeout=60.0)
         self._scratch_dir_path: Path | None = None
 
@@ -126,9 +177,7 @@ class GeminiAdapter(BaseMCPAdapter):
             prompt,
             "--output-format",
             "json",
-            "--mode",
-            "accept-edits",
-            "--dangerously-skip-permissions",
+            *GEMINI_CLI_SESSION_LOCKDOWN_FLAGS,
         ]
         if model:
             argv += ["--model", model]
