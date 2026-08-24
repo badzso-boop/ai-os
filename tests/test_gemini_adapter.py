@@ -210,11 +210,12 @@ def _read_argv_log(tmp_path) -> list[str]:
 
 
 async def test_cli_session_builds_locked_down_argv(tmp_path):
-    """`agy` genuinely supports a plan/read-only mode and a sandbox flag —
-    verified against its real `--help` output (issue #17) — so the
-    CLI-session executor must use exactly those, not the fabricated
-    `--disallowedTools` flag `agy` doesn't have (which a prior, closed fix
-    attempt used, and which `agy` would reject outright as unrecognized).
+    """Issue #42: `--mode plan --sandbox` took a real unattended epic run to
+    0/6 completed tasks (headless auto-denial of command-permission tools,
+    plus a broken bash resolution under `--sandbox`). The CLI-session
+    executor must use `--mode accept-edits --dangerously-skip-permissions`
+    instead, matching the Anthropic CLI-session adapter's non-interactive
+    posture, so it can actually complete a run.
     """
     from ai_os.mcp.adapters.gemini_adapter import GEMINI_CLI_SESSION_LOCKDOWN_FLAGS
 
@@ -233,16 +234,16 @@ async def test_cli_session_builds_locked_down_argv(tmp_path):
     argv = _read_argv_log(tmp_path)
 
     assert "--mode" in argv
-    assert argv[argv.index("--mode") + 1] == "plan"
-    assert "--sandbox" in argv
+    assert argv[argv.index("--mode") + 1] == "accept-edits"
+    assert "--dangerously-skip-permissions" in argv
     assert "-p" in argv
     assert argv[argv.index("-p") + 1] == "hello"
     assert "--output-format" in argv
     assert argv[argv.index("--output-format") + 1] == "json"
 
-    # The old, wrong lockdown attempt must be fully gone.
-    assert "accept-edits" not in argv
-    assert "--dangerously-skip-permissions" not in argv
+    # The headless-unusable lockdown attempt (issue #42) must be fully gone.
+    assert "plan" not in argv
+    assert "--sandbox" not in argv
     assert "--disallowedTools" not in argv
 
     # Every flag GEMINI_CLI_SESSION_LOCKDOWN_FLAGS declares actually landed
@@ -254,14 +255,16 @@ async def test_cli_session_builds_locked_down_argv(tmp_path):
 
 def test_cli_session_selection_logs_reduced_isolation_warning(caplog):
     """Operators must see, at runtime (not just in a code comment), that the
-    Gemini CLI-session path has coarser tool isolation than Anthropic's
-    (no --disallowedTools equivalent in `agy`).
+    Gemini CLI-session path auto-approves every tool permission prompt
+    (`--dangerously-skip-permissions`, issue #42) — AI-OS's own sandbox is
+    what actually validates the resulting changes, not `agy` itself.
     """
     with caplog.at_level("WARNING", logger="ai_os.mcp.adapters.gemini_adapter"):
         GeminiAdapter(gemini_cli="agy", use_cli_session=True)
 
     assert any(
-        "agy" in record.getMessage() and "disallowedTools" in record.getMessage()
+        "agy" in record.getMessage()
+        and "--dangerously-skip-permissions" in record.getMessage()
         for record in caplog.records
     )
 
