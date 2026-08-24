@@ -25,14 +25,27 @@ stays in ``memory`` journal mode regardless of what you ask for there. That's
 expected and is not something callers need to work around; just don't assert
 WAL mode against an in-memory engine.
 
-Alembic/migrations are intentionally out of scope for this MVP cut — there is
-no prior schema to migrate from yet.
+Issue #41 (Alembic added): a pre-existing `ai-os.db` created by
+`Base.metadata.create_all` never picks up a later model change — PR #32's
+`tasks` composite-PK fix only applied to brand-new databases, so any
+database created before that PR kept crashing with
+`IntegrityError: UNIQUE constraint failed: tasks.id` forever. `init_db` now
+runs the real Alembic migration chain (`<repo>/alembic/versions/`, starting
+from `d191ecad2a39_baseline_schema.py`, which reproduces exactly what
+`create_all` used to produce) instead of `create_all` directly, so a schema
+change from here on is a new revision under `alembic/versions/` that upgrades
+an existing on-disk database in place, not just a change to `models.py` that
+only new databases ever see.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from sqlalchemy import event
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -41,9 +54,9 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
-from ai_os.core.db.models import Base
-
 __all__ = ["make_engine", "init_db", "make_sessionmaker"]
+
+_ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 
 
 def _is_memory_url(url: str) -> bool:
@@ -95,15 +108,33 @@ def make_engine(url: str) -> AsyncEngine:
     return engine
 
 
+def _run_alembic_upgrade(connection: Connection) -> None:
+    """Run the Alembic migration chain to `head` on an already-open sync
+    connection (handed to us via `AsyncConnection.run_sync`). `env.py` picks
+    the connection up from `config.attributes["connection"]` instead of
+    opening its own, so this works against `:memory:` engines too — a second,
+    independently-opened connection to an in-memory SQLite URL would be a
+    distinct, empty database (see this module's docstring above).
+    """
+    cfg = AlembicConfig(str(_ALEMBIC_INI))
+    cfg.attributes["connection"] = connection
+    command.upgrade(cfg, "head")
+
+
 async def init_db(engine: AsyncEngine) -> None:
-    """Create all tables declared on `Base.metadata`.
+    """Bring the database up to the latest schema via Alembic (`upgrade head`).
 
     Must be called explicitly (once at startup, or once per test) rather than
-    at import time: `Base.metadata.create_all` needs a live connection, and
-    the async engine only opens one inside an `async with`/`await` context.
+    at import time: migrations need a live connection, and the async engine
+    only opens one inside an `async with`/`await` context. Works identically
+    for a brand-new database (runs every migration from scratch, ending at
+    the same schema `Base.metadata.create_all` used to produce directly) and
+    an existing one (runs only the migrations it hasn't seen yet) — see
+    issue #41 in this module's docstring for why that distinction now matters.
     """
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    async with engine.connect() as conn:
+        await conn.run_sync(_run_alembic_upgrade)
+        await conn.commit()
 
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
